@@ -9,7 +9,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-XAI_API_URL = "https://api.xai.ai/v1/chat/completions"  # Endpoint für Grok/xAI
+XAI_API_URL = "https://api.x.ai/v1/chat/completions"  # Endpoint für Grok/xAI
 
 @app.route("/", methods=["POST"])
 def webhook():
