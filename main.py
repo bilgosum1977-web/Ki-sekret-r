@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -15,7 +16,29 @@ class SimpleHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         
-        # Hier wird die Telegram-Nachricht später verarbeitet
+        try:
+            # Telegram-Daten als JSON einlesen
+            data = json.loads(post_data.decode('utf-8'))
+            
+            # Prüfen, ob eine Nachricht im Update enthalten ist
+            if "message" in data:
+                chat_id = data["message"]["chat"]["id"]
+                user_text = data["message"].get("text", "")
+                
+                # Antwort vorbereiten
+                reply_text = f"Hallo! Ich habe deine Nachricht erhalten: '{user_text}'"
+                
+                # An Telegram API senden (sendMessage)
+                url = f"{TELEGRAM_API_URL}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": reply_text
+                }
+                requests.post(url, json=payload)
+                
+        except Exception as e:
+            print(f"Fehler beim Verarbeiten: {e}")
+            
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
@@ -29,4 +52,5 @@ def run():
 
 if __name__ == '__main__':
     run()
+
 
