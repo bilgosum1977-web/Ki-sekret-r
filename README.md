@@ -1,1 +1,1 @@
-# Ki-sekret-r
+# Ki-sekretär
