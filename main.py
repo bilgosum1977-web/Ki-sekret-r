@@ -1,56 +1,66 @@
 import os
-import json
 import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask, request
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TOKEN}"
+app = Flask(__name__)
 
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Ki-Sekretaer Bot is active and running!")
+# Deine Token aus den Render Environment Variables
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GROK_API_KEY = os.environ.get("GROK_API_KEY")
 
-    def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length)
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+XAI_API_URL = "https://api.xai.ai/v1/chat/completions"  # Endpoint für Grok/xAI
+
+@app.route("/", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    
+    # Prüfen, ob eine Nachricht vorhanden ist
+    if "message" in data and "text" in data["message"]:
+        chat_id = data["message"]["chat"]["id"]
+        user_text = data["message"]["text"]
         
-        try:
-            # Telegram-Daten als JSON einlesen
-            data = json.loads(post_data.decode('utf-8'))
-            
-            # Prüfen, ob eine Nachricht im Update enthalten ist
-            if "message" in data:
-                chat_id = data["message"]["chat"]["id"]
-                user_text = data["message"].get("text", "")
-                
-                # Antwort vorbereiten
-                reply_text = f"Hallo! Ich habe deine Nachricht erhalten: '{user_text}'"
-                
-                # An Telegram API senden (sendMessage)
-                url = f"{TELEGRAM_API_URL}/sendMessage"
-                payload = {
-                    "chat_id": chat_id,
-                    "text": reply_text
-                }
-                requests.post(url, json=payload)
-                
-        except Exception as e:
-            print(f"Fehler beim Verarbeiten: {e}")
-            
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        # 1. Anfrage an Grok (xAI) senden
+        ai_reply = ask_grok(user_text)
+        
+        # 2. Antwort an Telegram zurückschicken
+        send_telegram_message(chat_id, ai_reply)
+        
+    return "OK", 200
 
-def run():
-    port = int(os.environ.get("PORT", 10000))
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, SimpleHandler)
-    print(f"Server laeuft auf Port {port}")
-    httpd.serve_forever()
+def ask_grok(prompt):
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "grok-beta",  # Aktuelles Standardmodell von xAI
+        "messages": [
+            {"role": "system", "content": "Du bist ein hilfreicher, präziser AI Secretary."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    
+    try:
+        response = requests.post(XAI_API_URL, json=payload, headers=headers)
+        if response.status_code == 200:
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        else:
+            return f"Fehler von xAI: {response.status_code} - {response.text}"
+    except Exception as e:
+        return f"Fehler bei der Verbindung zur KI: {str(e)}"
 
-if __name__ == '__main__':
-    run()
+def send_telegram_message(chat_id, text):
+    url = f"{TELEGRAM_API_URL}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    requests.post(url, json=payload)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
+
 
 
