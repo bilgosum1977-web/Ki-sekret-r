@@ -34,7 +34,7 @@ def ask_grok(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "grok-2",  # Aktuelles Standardmodell von xAI
+        "model": "grok-4",  # Aktuelles Standardmodell von xAI
         "messages": [
             {"role": "system", "content": "Du bist ein hilfreicher, präziser AI Secretary."},
             {"role": "user", "content": prompt}
