@@ -1,41 +1,40 @@
-
 import os
 import requests
 from flask import Flask, request
 
 app = Flask(__name__)
 
-# API Keys aus den Render Environment Variables auslesen
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-GROK_API_KEY = os.environ.get("GROK_API_KEY")
-APIFY_API_KEY = os.environ.get("APIFY_API_KEY")
-MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
+# API-Schlüssel aus den Render Environment Variables laden
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+APIFY_API_KEY = os.getenv("APIFY_API_KEY")
+MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")  # Optional
 
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# Gedächtnis für Chat-Verläufe und Guthaben pro User-ID
-chat_histories = {}
-user_balances = {}  # Speichert das Guthaben in Euro pro User
-MAX_HISTORY_LENGTH = 10
-INITIAL_BALANCE = 2.50  # Startguthaben zum Testen (entspricht 5 Premium-Aktionen)
+# Business Model Konfiguration
+INITIAL_BALANCE = 2.50
 COST_PER_PREMIUM_TASK = 0.50
+
+# In-Memory Speicher für User-Guthaben und Chat-Verläufe
+user_balances = {}
+chat_histories = {}
+MAX_HISTORY_LENGTH = 10
 
 
 def send_telegram_message(chat_id, text):
-  """Sendet eine Nachricht an den Telegram-User."""
-  url = f"{TELEGRAM_API_URL}/sendMessage"
-  payload = {"chat_id": chat_id, "text": text}
+  """Sendet eine Nachricht an den Telegram Chat"""
+  url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+  payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
   try:
-    requests.post(url, json=payload)
+    requests.post(url, json=payload, timeout=5)
   except Exception as e:
-    print(f"Fehler beim Senden an Telegram: {e}")
+    print(f"Telegram Sende-Fehler: {e}")
 
 
 def call_groq_llama(history):
-  """Haupt-Worker: Llama 3.3 via Groq (Kostenlos)"""
+  """Kostenloser Standard-Worker: Groq (Llama)"""
   if not GROQ_API_KEY:
     return None
   url = "https://api.groq.com/openai/v1/chat/completions"
@@ -48,36 +47,67 @@ def call_groq_llama(history):
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
       return response.json()["choices"][0]["message"]["content"]
+    else:
+      print(f"Groq API Fehler: {response.text}")
   except Exception as e:
-    print(f"Groq/Llama Fehler: {e}")
+    print(f"Groq Fehler: {e}")
   return None
 
 
 def call_gemini(history):
-  """Experte für lange Texte: Gemini 1.5 Flash (Kostenlos)"""
+  """Kostenloses Backup: Google Gemini (Flash)"""
   if not GEMINI_API_KEY:
-    return None
+    history_text = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+    return (
+        f"Simulierte Gemini-Antwort (Kein Key eingetragen): {history_text[-100:]}"
+    )
+
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
   contents = []
   for msg in history:
     role = "user" if msg["role"] == "user" else "model"
-    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    contents.append(
+        {"role": role, "parts": [{"text": msg["content"]}]}
+    )
 
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-  headers = {"Content-Type": "application/json"}
   payload = {"contents": contents}
   try:
-    response = requests.post(url, json=payload, headers=headers, timeout=15)
+    response = requests.post(url, json=payload, timeout=10)
     if response.status_code == 200:
-      return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+      res_data = response.json()
+      return res_data["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+      print(f"Gemini API Fehler: {response.text}")
   except Exception as e:
     print(f"Gemini Fehler: {e}")
   return None
 
 
-def call_openai_gpt(history):
-  """Kostenpflichtiger Joker 1: OpenAI GPT-4o-mini"""
-  if not OPENAI_API_KEY:
+def call_grok(history):
+  """xAI Grok"""
+  if not GROK_API_KEY:
     return None
+  url = "https://api.x.ai/v1/chat/completions"
+  headers = {
+      "Authorization": f"Bearer {GROK_API_KEY}",
+      "Content-Type": "application/json",
+  }
+  payload = {"model": "grok-2", "messages": history}
+  try:
+    response = requests.post(url, json=payload, headers=headers, timeout=10)
+    if response.status_code == 200:
+      return response.json()["choices"][0]["message"]["content"]
+    else:
+      print(f"Grok API Fehler: {response.text}")
+  except Exception as e:
+    print(f"Grok Fehler: {e}")
+  return None
+
+
+def call_openai_gpt(history):
+  """OpenAI GPT (für Automatisierungen/Joker)"""
+  if not OPENAI_API_KEY:
+    return "OpenAI API Key fehlt."
   url = "https://api.openai.com/v1/chat/completions"
   headers = {
       "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -88,43 +118,37 @@ def call_openai_gpt(history):
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
       return response.json()["choices"][0]["message"]["content"]
+    else:
+      print(f"OpenAI API Fehler: {response.text}")
   except Exception as e:
     print(f"OpenAI Fehler: {e}")
   return None
 
 
-def call_grok(history):
-  """Kostenpflichtiger Joker 2: Grok 4"""
-  if not GROK_API_KEY:
-    return None
-  url = "https://api.x.ai/v1/chat/completions"
-  headers = {
-      "Authorization": f"Bearer {GROK_API_KEY}",
-      "Content-Type": "application/json",
-  }
-  payload = {"model": "grok-4", "messages": history}
-  try:
-    response = requests.post(url, json=payload, headers=headers, timeout=10)
-    if response.status_code == 200:
-      return response.json()["choices"][0]["message"]["content"]
-  except Exception as e:
-    print(f"Grok Fehler: {e}")
-  return None
-
-
-def run_apify_scraper(query):
-  """Apify Web-Scraper"""
+def run_apify_scraper(prompt):
+  """Apify Web-Scraping Integration"""
   if not APIFY_API_KEY:
-    return "Apify API Key ist nicht konfiguriert."
-  url = f"https://api.apify.com/v2/acts/apify~web-scraper/run-sync-get-dataset-items?token={APIFY_API_KEY}"
-  payload = {"startUrls": [{"url": f"https://www.google.com/search?q={query}"}]}
+    return "Apify API Key fehlt im System."
+  # Beispielhafter Actor-Aufruf (Google Search / Web Scraper)
+  url = f"https://api.apify.com/v2/acts/apify~google-search-scraper/run-sync-get-dataset-items?token={APIFY_API_KEY}"
+  payload = {"queries": prompt, "maxPagesPerQuery": 1, "resultsPerPage": 3}
   try:
     response = requests.post(url, json=payload, timeout=30)
-    if response.status_code in [200, 201]:
-      return "Web-Abfrage erfolgreich abgeschlossen."
+    if response.status_code == 201 or response.status_code == 200:
+      data = response.json()
+      if data and isinstance(data, list):
+        snippets = [
+            item.get("description", item.get("title", "")) for item in data[:3]
+        ]
+        return (
+            "Ergebnis vom Web-Scraping:\n"
+            + "\n".join([s for s in snippets if s])
+        )
+      return "Scraper erfolgreich, aber keine passenden Daten gefunden."
+    else:
+      return f"Fehler beim Scraping: {response.status_code}"
   except Exception as e:
-    print(f"Apify Fehler: {e}")
-  return "Fehler beim Ausführen des Web-Scrapers."
+    return f"Scraper-Fehlgeschlagen: {str(e)}"
 
 
 @app.route("/", methods=["POST"])
@@ -165,7 +189,7 @@ def webhook():
   bot_reply = None
   text_lower = user_text.lower()
 
-  # 1. Premium-Aufgaben (Scraping oder Automatisierung)
+  # 1. Aktive Premium-Aufgaben (Scraping oder Make) -> Kostenpflichtig (0.50 €)
   is_premium_request = (
       "scrape" in text_lower
       or "web durchsuchen" in text_lower
@@ -174,33 +198,31 @@ def webhook():
   )
 
   if is_premium_request:
-    # Prüfen ob genug Guthaben da ist
     if user_balances[chat_id] < COST_PER_PREMIUM_TASK:
       send_telegram_message(
           chat_id,
           "❌ **Nicht genug Guthaben!** Diese Aktion kostet"
           f" {COST_PER_PREMIUM_TASK:.2f} €. Dein Kontostand liegt bei"
-          f" {user_balances[chat_id]:.2f} €. Bitte lade dein Guthaben auf.",
+          f" {user_balances[chat_id]:.2f} €.",
       )
       return "OK", 200
 
     # Guthaben abziehen
     user_balances[chat_id] -= COST_PER_PREMIUM_TASK
 
-    # Ausführen je nach Art
     if "scrape" in text_lower or "web durchsuchen" in text_lower:
       send_telegram_message(
           chat_id,
           f"💡 **Premium-Service:** -{COST_PER_PREMIUM_TASK:.2f} € abgezogen."
-          f" Restguthaben: **{user_balances[chat_id]:.2f} €**. Führe Abfrage"
-          " aus...",
+          f" Restguthaben: **{user_balances[chat_id]:.2f} €**. Starte"
+          " Web-Abfrage...",
       )
       bot_reply = run_apify_scraper(user_text)
     else:
       send_telegram_message(
           chat_id,
-          f"⚙️ **Automatisierungs-Service:** -{COST_PER_PREMIUM_TASK:.2f} €"
-          f" abgezogen. Restguthaben: **{user_balances[chat_id]:.2f} €**. Starte"
+          f"⚙️ **Automatisierung:** -{COST_PER_PREMIUM_TASK:.2f} € abgezogen."
+          f" Restguthaben: **{user_balances[chat_id]:.2f} €**. Starte"
           " Workflow...",
       )
       bot_reply = call_openai_gpt(current_history)
@@ -214,37 +236,23 @@ def webhook():
         except Exception as e:
           print(f"Make Webhook Fehler: {e}")
 
-  # 2. Kostenlose Standard-Anfragen
+  # 2. Normale Chat-Anfragen (IMMER KOSTENLOS!)
   else:
-    if len(user_text) > 800:
+    # Versuche zuerst Groq (Llama)
+    bot_reply = call_groq_llama(current_history)
+
+    # Wenn Groq ausfällt, nimm Gemini als kostenlosen Backup (kostet KEIN Geld!)
+    if not bot_reply:
       bot_reply = call_gemini(current_history)
-    else:
-      bot_reply = call_groq_llama(current_history)
 
-  # 3. Fallbacks (Joker) - Falls die kostenlosen ausfallen, zieht es ebenfalls den Betrag ab
-  if not bot_reply and not is_premium_request:
-    if user_balances[chat_id] >= COST_PER_PREMIUM_TASK:
-      user_balances[chat_id] -= COST_PER_PREMIUM_TASK
-      send_telegram_message(
-          chat_id,
-          "⚠️ **Hinweis:** Server ausgelastet. Premium-Joker aktiv"
-          f" (-{COST_PER_PREMIUM_TASK:.2f} €). Restguthaben:"
-          f" **{user_balances[chat_id]:.2f} €**.",
-      )
+    # Wenn auch das schlägt fehl, nimm Grok als letzten Ausweg für den normalen Chat (ebenfalls kostenlos)
+    if not bot_reply:
       bot_reply = call_grok(current_history)
-    else:
-      bot_reply = (
-          "Entschuldigung, unsere Server sind überlastet und dein Guthaben"
-          " reicht für den Notfall-Joker nicht mehr aus."
-      )
 
-  if not bot_reply and is_premium_request:
-    # Falls OpenAI im Premium-Zweig versagt hat, probieren wir Grok
-    bot_reply = call_grok(current_history)
-
+  # Fallback falls gar nichts klappt
   if not bot_reply:
     bot_reply = (
-        "Entschuldigung, im Moment ist ein Fehler aufgetreten. Bitte versuche"
+        "Entschuldigung, im Moment sind alle Leitungen belegt. Bitte versuche"
         " es gleich noch einmal."
     )
 
@@ -254,9 +262,15 @@ def webhook():
   return "OK", 200
 
 
+@app.route("/", methods=["GET"])
+def index():
+  return "Bot is running live!", 200
+
+
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
+
 
 
 
