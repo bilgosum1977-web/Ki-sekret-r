@@ -55,20 +55,15 @@ def call_groq_llama(history):
 
 
 def call_gemini(history):
-  """Kostenloses Backup: Google Gemini (Flash)"""
+  """Google Gemini (optimiert für AQ-Schlüsselformat)"""
   if not GEMINI_API_KEY:
-    history_text = "\n".join([f"{m['role']}: {m['content']}" for m in history])
-    return (
-        f"Simulierte Gemini-Antwort (Kein Key eingetragen): {history_text[-100:]}"
-    )
+    return None
 
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
   contents = []
   for msg in history:
     role = "user" if msg["role"] == "user" else "model"
-    contents.append(
-        {"role": role, "parts": [{"text": msg["content"]}]}
-    )
+    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
   payload = {"contents": contents}
   try:
@@ -84,7 +79,7 @@ def call_gemini(history):
 
 
 def call_grok(history):
-  """xAI Grok"""
+  """xAI Grok 4"""
   if not GROK_API_KEY:
     return None
   url = "https://api.x.ai/v1/chat/completions"
@@ -92,7 +87,7 @@ def call_grok(history):
       "Authorization": f"Bearer {GROK_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {"model": "grok-2", "messages": history}
+  payload = {"model": "grok-4", "messages": history}
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
@@ -129,7 +124,6 @@ def run_apify_scraper(prompt):
   """Apify Web-Scraping Integration"""
   if not APIFY_API_KEY:
     return "Apify API Key fehlt im System."
-  # Beispielhafter Actor-Aufruf (Google Search / Web Scraper)
   url = f"https://api.apify.com/v2/acts/apify~google-search-scraper/run-sync-get-dataset-items?token={APIFY_API_KEY}"
   payload = {"queries": prompt, "maxPagesPerQuery": 1, "resultsPerPage": 3}
   try:
@@ -241,11 +235,11 @@ def webhook():
     # Versuche zuerst Groq (Llama)
     bot_reply = call_groq_llama(current_history)
 
-    # Wenn Groq ausfällt, nimm Gemini als kostenlosen Backup (kostet KEIN Geld!)
+    # Wenn Groq ausfällt, nimm Gemini als kostenloses Backup
     if not bot_reply:
       bot_reply = call_gemini(current_history)
 
-    # Wenn auch das schlägt fehl, nimm Grok als letzten Ausweg für den normalen Chat (ebenfalls kostenlos)
+    # Wenn auch das schlägt fehl, nimm Grok 4 als letzten Ausweg
     if not bot_reply:
       bot_reply = call_grok(current_history)
 
@@ -270,6 +264,7 @@ def index():
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
+
 
 
 
