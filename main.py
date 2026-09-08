@@ -12,6 +12,7 @@ app = Flask(__name__)
 
 # --- Konfiguration & API-Schlüssel ---
 TELEGRAM_BOT_TOKEN = "8818900840:AAHfyoscsxqiv1wez9qtZfb1b5PbhP1YBjY"
+ADMIN_USER_ID = "8874543115"  # Deine Admin-ID
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 if GROQ_API_KEY:
@@ -41,11 +42,18 @@ def clean_think_tags(text):
         return text.split("</think>")[-1].strip()
     return text
 
-def send_telegram_message(chat_id, text):
+def send_telegram_message(chat_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Zeige das Team-/Quellen-Tag NUR für dich als Admin an!
+    if str(chat_id) == ADMIN_USER_ID and model_name:
+        final_text = f"{text}\n\n[Team: {model_name}]"
+    else:
+        final_text = text
+
     payload = {
         "chat_id": chat_id,
-        "text": text  # Völlig sauber für den Nutzer!
+        "text": final_text
     }
     try:
         response = requests.post(url, json=payload, timeout=5)
@@ -56,12 +64,19 @@ def send_telegram_message(chat_id, text):
         print(f"Fehler beim Telegram-Senden: {e}", flush=True)
     return None
 
-def edit_telegram_message(chat_id, message_id, text):
+def edit_telegram_message(chat_id, message_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    
+    # Auch beim Bearbeiten das Tag nur für den Admin einblenden
+    if str(chat_id) == ADMIN_USER_ID and model_name:
+        final_text = f"{text}\n\n[Team: {model_name}]"
+    else:
+        final_text = text
+
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": text  # Auch hier keine Tags für den Nutzer
+        "text": final_text
     }
     try:
         requests.post(url, json=payload, timeout=5)
@@ -114,13 +129,13 @@ def call_groq_text(history, search_context=None):
         reply = response.choices[0].message.content
         reply = clean_think_tags(reply)
         
-        source_info = "DuckDuckGo Live-Suche + Groq" if search_context else "Groq Reines Wissen"
-        print(f"[ADMIN LOG] 🤖 Antwort generiert via [{source_info}]", flush=True)
+        model_tag = "DuckDuckGo Live-Suche + Groq" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]} - Wissen)"
+        print(f"[ADMIN LOG] 🤖 Antwort generiert via [{model_tag}]", flush=True)
         
-        return reply
+        return reply, model_tag
     except Exception as e:
         print(f"[ADMIN LOG] ❌ Groq Text Fehler: {e}", flush=True)
-        return f"Es ist ein technischer Fehler aufgetreten: {e}"
+        return f"Es ist ein technischer Fehler aufgetreten: {e}", "Groq (Fehler)"
 
 def call_groq_vision(user_text, image_bytes):
     try:
@@ -144,10 +159,10 @@ def call_groq_vision(user_text, image_bytes):
         reply = clean_think_tags(reply)
         
         print(f"[ADMIN LOG] 👁️ Bildanalyse erfolgreich mit Qwen Vision", flush=True)
-        return reply
+        return reply, "Groq Vision (Bildanalyse)"
     except Exception as e:
         print(f"[ADMIN LOG] ❌ Groq Vision Fehler: {e}", flush=True)
-        return f"Bildanalyse-Fehler: {e}"
+        return f"Bildanalyse-Fehler: {e}", "Groq (Fehler)"
 
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
@@ -164,20 +179,20 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
             
         search_context = None
-        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs", "hotel", "antalya", "rezensionen"]
+        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs", "hotel", "antalya", "istanbul", "rezensionen"]
         
         if image_bytes is not None:
-            bot_reply = call_groq_vision(user_text, image_bytes)
+            bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
             if any(trigger in lower_text for trigger in live_triggers):
                 search_context = search_web(user_text)
-            bot_reply = call_groq_text(chat_histories[chat_id], search_context=search_context)
+            bot_reply, used_model_name = call_groq_text(chat_histories[chat_id], search_context=search_context)
             
         if not bot_reply:
             bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
             
         chat_histories[chat_id].append({"role": "assistant", "content": bot_reply})
-        edit_telegram_message(chat_id, loading_msg_id, bot_reply)
+        edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
             
     except Exception as e:
         print(f"[ADMIN LOG] ❌ FEHLER IM BACKGROUND WORKER: {e}", flush=True)
