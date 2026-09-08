@@ -30,8 +30,13 @@ INITIAL_BALANCE = 10000
 MAX_HISTORY_LENGTH = 15
 
 SYSTEM_PROMPT = (
-    "Du bist 'Ki Sekretär', ein hochkompetenter, freundlicher und effizienter KI-Assistent. "
-    "Antworte präzise, professionell und auf den Punkt."
+    "Du bist 'Ki Sekretär', ein hochkompetenter, proaktiver und ehrlicher KI-Assistent. "
+    "Du hast Zugriff auf kostenlose Live-Daten aus dem Internet (DuckDuckGo) und lokale Bildbearbeitung. "
+    "REGEL ZU KOSTEN: Alles, was mit reinem Wissen, Live-Suche oder lokaler Bildbearbeitung zu tun hat, ist für den Nutzer völlig kostenlos. "
+    "Wenn der Nutzer verlangt, dass du aktiv wirst (z. B. externe Geschäfte anschreibst, Web-Scraping über externe Tools machst oder Verhandlungen führst), "
+    "prüfe, ob das kostenpflichtige Dienste erfordert. Wenn ja, antworte direkt: "
+    "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?' "
+    "Ergreife ansonsten proaktiv die Initiative und frage, ob du bei der Umsetzung helfen sollst."
 )
 
 def clean_think_tags(text):
@@ -115,7 +120,7 @@ def call_groq_text(history, search_context=None):
         if search_context:
             messages.append({
                 "role": "system", 
-                "content": f"Hier sind aktuelle Live-Suchergebnisse aus dem Internet:\n{search_context}\nNutze diese Informationen, um die Frage des Nutzers zu beantworten."
+                "content": f"Hier sind aktuelle Live-Suchergebnisse aus dem Internet (kostenlos):\n{search_context}\nNutze diese Informationen, um die Frage des Nutzers präzise zu beantworten."
             })
             
         messages.extend(history)
@@ -127,9 +132,9 @@ def call_groq_text(history, search_context=None):
             max_tokens=1024
         )
         reply = response.choices[0].message.content
-        reply = clean_think_tags(reply)  # Denk-Tags entfernen
+        reply = clean_think_tags(reply)
         
-        model_tag = "Groq (Live-Suche)" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
+        model_tag = "Groq (Live-Suche - Kostenlos)" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]} - Kostenlos)"
         return reply, model_tag
     except Exception as e:
         print(f"Groq Text Fehler: {e}", flush=True)
@@ -158,9 +163,9 @@ def call_groq_vision(user_text, image_bytes):
             max_tokens=1024
         )
         reply = response.choices[0].message.content
-        reply = clean_think_tags(reply)  # Denk-Tags entfernen
+        reply = clean_think_tags(reply)
         
-        return reply, "Groq OSS-20B (Vision)"
+        return reply, "Groq OSS-20B (Vision - Kostenlos)"
     except Exception as e:
         print(f"Groq Vision Fehler: {e}", flush=True)
         return f"Groq Vision API Fehler: {e}", "Groq (Fehler)"
@@ -190,12 +195,12 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             
         lower_text = user_text.lower() if user_text else ""
         
-        # 1. Bildbearbeitung (RemBG)
+        # 1. Bildbearbeitung (RemBG) - Kostenlos
         if image_bytes is not None and any(cmd in lower_text for cmd in ["freistellen", "hintergrund entfernen", "ohne hintergrund"]):
             print("Starte lokale Bildbearbeitung (RemBG)...", flush=True)
             processed_bytes = process_image_with_rembg(image_bytes)
             if processed_bytes:
-                send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG]")
+                send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG - Kostenlos]")
                 return
             else:
                 edit_telegram_message(chat_id, loading_msg_id, "Fehler bei der Bildfreistellung.", model_name="RemBG")
@@ -212,9 +217,12 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             print("Leite Bild an Groq Vision weiter...", flush=True)
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
+            # Automatische Live-Suche für Echtzeit-Daten
             search_context = None
-            if any(keyword in lower_text for keyword in ["aktuell", "heute", "nachrichten", "wetter", "suche", "wer ist", "was ist"]):
-                print(f"Führe Live-Websuche aus für: {user_text}", flush=True)
+            live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs"]
+            
+            if any(trigger in lower_text for trigger in live_triggers):
+                print(f"Automatische Live-Websuche für: {user_text}", flush=True)
                 search_context = search_web(user_text)
                 
             print("Leite Text an Groq weiter...", flush=True)
