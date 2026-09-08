@@ -33,6 +33,15 @@ SYSTEM_PROMPT = (
     "Du agierst als Teil eines engen KI-Teams. Antworte präzise, professionell und auf den Punkt."
 )
 
+def send_chat_action(chat_id, action="typing"):
+    """Zeigt in Telegram an, dass der Bot tippt oder ein Bild hochlädt."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    payload = {"chat_id": chat_id, "action": action}
+    try:
+        requests.post(url, json=payload, timeout=3)
+    except Exception as e:
+        print(f"Fehler beim Senden der Chat-Aktion: {e}", flush=True)
+
 def send_telegram_message(chat_id, text, model_name=""):
     """Sendet die formatierte Antwort an den Telegram-Chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -194,6 +203,12 @@ def webhook():
                 
         if not user_text and not image_bytes:
             return "OK", 200
+            
+        # Sofort "schreibt..." oder "sendet Foto..." anzeigen, damit der Nutzer Feedback hat
+        if image_bytes or any(cmd in user_text.lower() for cmd in ["erstelle ein bild", "generiere ein bild", "male ein bild", "zeichne"]):
+            send_chat_action(chat_id, action="upload_photo")
+        else:
+            send_chat_action(chat_id, action="typing")
             
         if chat_id not in user_balances:
             user_balances[chat_id] = INITIAL_BALANCE
