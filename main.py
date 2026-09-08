@@ -30,14 +30,14 @@ def webhook():
   if not user_text:
     return "OK", 200
 
-  # Direkter Aufruf an Groq
+  # Korrekter Aufruf mit dem neuen Groq-Modell
   url = "https://api.groq.com/openai/v1/chat/completions"
   headers = {
       "Authorization": f"Bearer {GROQ_API_KEY}",
       "Content-Type": "application/json",
   }
   payload = {
-      "model": ""llama-3.3-70b-versatile" ",
+      "model": "llama-3.3-70b-versatile",
       "messages": [{"role": "user", "content": user_text}],
   }
 
@@ -62,6 +62,7 @@ def index():
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
+
 
 
 
