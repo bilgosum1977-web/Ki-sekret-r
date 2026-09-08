@@ -2,7 +2,9 @@ flask
 groq
 requests
 Pillow
-rembg
+onnxruntime
+rembg[cpu]
 duckduckgo_search
+
 
 
