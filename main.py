@@ -18,9 +18,9 @@ if GROQ_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Modell-Namen
+# Modell-Namen (Aktualisiert auf Gemini 3.7 Flash)
 GROQ_MODEL = "openai/gpt-oss-20b"
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-3.7-flash"
 
 # Lokaler Speicher für Chats & Guthaben
 chat_histories = {}
@@ -79,14 +79,13 @@ def call_groq_openai(history):
         return None, None
 
 def call_gemini(history, image_bytes=None):
-    """Ruft Gemini für Web-Recherche, Dokumente und Bildanalysen auf."""
+    """Ruft Gemini 3.7 Flash für Bildanalysen und Text auf."""
     try:
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
             system_instruction=SYSTEM_PROMPT
         )
         
-        # Wenn ein Bild vorhanden ist, nutzen wir Part.from_bytes für den fehlerfreien Upload
         if image_bytes:
             prompt_text = history[-1]["content"] if history else "Was ist auf diesem Bild zu sehen?"
             image_part = genai.types.Part.from_bytes(
@@ -96,7 +95,6 @@ def call_gemini(history, image_bytes=None):
             response = model.generate_content([prompt_text, image_part])
             return response.text, f"Gemini ({GEMINI_MODEL})"
         
-        # Für reinen Text mit Chat-Historie
         gemini_history = []
         for msg in history[:-1]:
             role = "user" if msg["role"] == "user" else "model"
@@ -108,18 +106,15 @@ def call_gemini(history, image_bytes=None):
             
         return response.text, f"Gemini ({GEMINI_MODEL})"
     except Exception as e:
-        print(f"Gemini Detail-Fehler: {e}", flush=True)
-        return None, None
+        error_msg = str(e)
+        print(f"Gemini Detail-Fehler: {error_msg}", flush=True)
+        return f"Gemini API Fehler: {error_msg}", "Gemini (Fehler)"
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """Smarter Team-Router: Bilder gehen direkt zu Gemini. Reiner Text nutzt Groq mit Fallback."""
-    
+    """Smarter Team-Router: Bilder gehen direkt zu Gemini 3.7 Flash."""
     if image_bytes is not None:
-        print("Bild erkannt -> Leite direkt an Gemini (Vision) weiter.", flush=True)
-        resp, model_name = call_gemini(history, image_bytes=image_bytes)
-        if resp:
-            return resp, model_name
-        return "Entschuldigung, ich konnte das Bild wegen eines Verarbeitungsfehlers nicht analysieren.", "Gemini (Fehler)"
+        print("Bild erkannt -> Leite direkt an Gemini 3.7 Flash weiter.", flush=True)
+        return call_gemini(history, image_bytes=image_bytes)
 
     def try_groq():
         return call_groq_openai(history)
@@ -136,11 +131,7 @@ def smart_route_message(history, user_text, image_bytes=None):
             print(f"Groq Fehler: {e}. Gemini übernimmt.", flush=True)
             
     print("Fallback greift -> Gemini übernimmt.", flush=True)
-    resp, model_name = call_gemini(history, image_bytes=None)
-    if resp:
-        return resp, model_name
-        
-    return "Entschuldigung, im Moment sind alle Leitungen überlastet.", "System-Fallback"
+    return call_gemini(history, image_bytes=None)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
