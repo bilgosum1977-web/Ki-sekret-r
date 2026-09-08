@@ -12,65 +12,56 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 # URL für die Telegram API
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Einfache In-Memory-Speicher für Chats und Historie
+# In-Memory-Speicher für Chats und Historie
 chat_histories = {}
 user_balances = {}
-INITIAL_BALANCE = 10000  # Beispielhafter Startwert
+INITIAL_BALANCE = 10000
 MAX_HISTORY_LENGTH = 10
 
 def send_telegram_message(chat_id, text, model_name=None):
-    """Sendet eine Nachricht an den Telegram-Chat zurück."""
+    """Sendet eine Nachricht an den Telegram-Chat zurück (ohne parse_mode zur Fehlervermeidung)."""
     if model_name:
-        text = f"{text}\n\n*(Modell: {model_name})*"
+        text = f"{text}\n\n[Team: {model_name}]"
     
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
+        "text": text
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram Sende-Antwort: {response.status_code}")
+        print(f"Telegram Sende-Antwort Status: {response.status_code}", flush=True)
     except Exception as e:
-        print(f"Fehler beim Senden der Telegram-Nachricht: {e}")
+        print(f"Fehler beim Senden der Telegram-Nachricht: {e}", flush=True)
 
 def get_telegram_file_bytes(file_id):
     """Lädt ein Bild von Telegram herunter, falls der Nutzer eins geschickt hat."""
     try:
         file_info_url = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
-        resp = requests.get(file_info_url).json()
+        resp = requests.get(file_info_url, timeout=5).json()
         if resp.get("ok"):
             file_path = resp["result"]["file_path"]
             download_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-            img_resp = requests.get(download_url)
+            img_resp = requests.get(download_url, timeout=10)
             if img_resp.status_code == 200:
                 return img_resp.content
     except Exception as e:
-        print(f"Fehler beim Herunterladen des Telegram-Files: {e}")
+        print(f"Fehler beim Herunterladen des Telegram-Files: {e}", flush=True)
     return None
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """
-    Verarbeitet die Nachricht mit den KI-Modellen. 
-    Hier als stabiler Fallback integriert, falls Groq/Gemini genutzt werden.
-    """
-    # Fallback-Antwort, falls noch keine echten API-Keys konfiguriert sind
+    """Verarbeitet die Nachricht mit den KI-Modellen."""
     if not GROQ_API_KEY and not GEMINI_API_KEY:
         return "Hallo! Ich habe deine Nachricht erhalten, aber es sind noch keine API-Schlüssel (Groq/Gemini) in Render hinterlegt.", "System-Fallback"
 
-    # Beispielhafter Aufruf (an deine bisherige Logik angepasst, falls du spezifische Bibliotheken nutzt)
-    # Hier fangen wir es generisch ab, damit der Bot auf jeden Fall antwortet:
     response_text = f"Echo: Ich habe deine Nachricht erhalten: '{user_text}'"
     
-    # Beispielhafter Test mit Groq falls Key da ist
     if GROQ_API_KEY:
         try:
             headers = {
                 "Authorization": f"Bearer {GROQ_API_KEY}",
                 "Content-Type": "application/json"
             }
-            # Beispielhafte Anfrage an Groq (llama-3-70b-8192 o.ä.)
             payload = {
                 "model": "llama3-70b-8192",
                 "messages": [{"role": "user", "content": user_text}]
@@ -80,8 +71,10 @@ def smart_route_message(history, user_text, image_bytes=None):
                 data = res.json()
                 response_text = data["choices"][0]["message"]["content"]
                 return response_text, "Groq (Llama3)"
+            else:
+                print(f"Groq API Fehler Status {res.status_code}: {res.text}", flush=True)
         except Exception as e:
-            print(f"Groq API Fehler: {e}")
+            print(f"Groq API Exception: {e}", flush=True)
 
     return response_text, "Standard-Antwort"
 
@@ -93,7 +86,7 @@ def index():
 def webhook():
     try:
         data = request.get_json()
-        print(f"Eingehendes JSON von Telegram: {data}")
+        print(f"Eingehendes JSON von Telegram: {data}", flush=True)
         
         if not data or "message" not in data:
             return "OK", 200
@@ -128,9 +121,9 @@ def webhook():
             
         current_history = chat_histories[chat_id]
         
-        print(f"Starte Smart Routing für Text: '{user_text}'...")
+        print(f"Starte Smart Routing für Text: '{user_text}'...", flush=True)
         bot_reply, used_model_name = smart_route_message(current_history, user_text, image_bytes=image_bytes)
-        print(f"KI Antwort erhalten: {bot_reply} von Modell: {used_model_name}")
+        print(f"KI Antwort erhalten: {bot_reply} von Modell: {used_model_name}", flush=True)
         
         if not bot_reply:
             bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
@@ -139,7 +132,7 @@ def webhook():
         send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
         
     except Exception as e:
-        print(f"KRITISCHER FEHLER IM WEBHOOK: {e}")
+        print(f"KRITISCHER FEHLER IM WEBHOOK: {e}", flush=True)
         
     return "OK", 200
 
