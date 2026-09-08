@@ -1,86 +1,139 @@
 import os
-import requests
+import concurrent.futures
 from flask import Flask, request
+from groq import Groq
+import google.generativeai as genai
+import requests
 
 app = Flask(__name__)
 
-# API-Schlüssel aus den Render Environment Variables laden
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+# --- 1. Konfiguration & API-Schlüssel ---
+TELEGRAM_BOT_TOKEN = "8818900840:AAHfyoscsxqiv1wez9qtZfb1b5PbhP1YBjY"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# URL für die Telegram API
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+# SDK Clients initialisieren
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# In-Memory-Speicher für Chats und Historie
+# Modell-Namen nach deiner Vorgabe
+GROQ_MODEL = "openai/gpt-oss-20b"   # Dein gewähltes Groq-Modell
+GEMINI_MODEL = "gemini-1.5-flash"   # Der Vision- & Websuche-Spezialist
+
+# Lokaler Speicher für Chats & Guthaben
 chat_histories = {}
 user_balances = {}
 INITIAL_BALANCE = 10000
-MAX_HISTORY_LENGTH = 10
+MAX_HISTORY_LENGTH = 15
 
-def send_telegram_message(chat_id, text, model_name=None):
-    """Sendet eine Nachricht an den Telegram-Chat zurück (ohne parse_mode zur Fehlervermeidung)."""
-    if model_name:
-        text = f"{text}\n\n[Team: {model_name}]"
-    
-    url = f"{TELEGRAM_API_URL}/sendMessage"
+SYSTEM_PROMPT = (
+    "Du bist 'Ki Sekretär', ein hochkompetenter, freundlicher und effizienter KI-Assistent. "
+    "Du agierst als Teil eines engen KI-Teams. Antworte präzise, professionell und auf den Punkt."
+)
+
+def send_telegram_message(chat_id, text, model_name=""):
+    """Sendet die formatierte Antwort an den Telegram-Chat."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text
+        "text": f"{text}\n\n[Team: {model_name}]" if model_name else text
     }
     try:
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=5)
         print(f"Telegram Sende-Antwort Status: {response.status_code}", flush=True)
     except Exception as e:
-        print(f"Fehler beim Senden der Telegram-Nachricht: {e}", flush=True)
+        print(f"Fehler beim Telegram-Senden: {e}", flush=True)
 
 def get_telegram_file_bytes(file_id):
-    """Lädt ein Bild von Telegram herunter, falls der Nutzer eins geschickt hat."""
+    """Lädt ein Bild direkt von den Telegram-Servern herunter."""
     try:
-        file_info_url = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
-        resp = requests.get(file_info_url, timeout=5).json()
-        if resp.get("ok"):
-            file_path = resp["result"]["file_path"]
-            download_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-            img_resp = requests.get(download_url, timeout=10)
-            if img_resp.status_code == 200:
-                return img_resp.content
+        file_info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
+        r = requests.get(file_info_url, timeout=5).json()
+        if not r.get("ok"):
+            return None
+        file_path = r["result"]["file_path"]
+        
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+        img_data = requests.get(file_url, timeout=10).content
+        return img_data
     except Exception as e:
-        print(f"Fehler beim Herunterladen des Telegram-Files: {e}", flush=True)
-    return None
+        print(f"Fehler beim Herunterladen des Telegram-Bildes: {e}", flush=True)
+        return None
+
+def call_groq_openai(history):
+    """Ruft Groq mit dem Modell openai/gpt-oss-20b für Text auf."""
+    try:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024
+        )
+        reply = response.choices[0].message.content
+        return reply, f"Groq ({GROQ_MODEL.split('/')[-1]})"
+    except Exception as e:
+        print(f"Groq Fehler: {e}", flush=True)
+        return None, None
+
+def call_gemini(history, image_bytes=None):
+    """Ruft Gemini für Web-Recherche, Dokumente und Bildanalysen auf."""
+    try:
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            system_instruction=SYSTEM_PROMPT
+        )
+        
+        gemini_history = []
+        for msg in history[:-1]:
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_history.append({"role": role, "parts": [msg["content"]]})
+            
+        chat = model.start_chat(history=gemini_history)
+        last_message = history[-1]["content"] if history else "Hallo"
+        
+        if image_bytes:
+            image_part = {
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            }
+            response = chat.send_message([last_message, image_part])
+        else:
+            response = chat.send_message(last_message)
+            
+        return response.text, f"Gemini ({GEMINI_MODEL})"
+    except Exception as e:
+        print(f"Gemini Fehler: {e}", flush=True)
+        return None, None
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """Verarbeitet die Nachricht mit den KI-Modellen."""
-    if not GROQ_API_KEY and not GEMINI_API_KEY:
-        return "Hallo! Ich habe deine Nachricht erhalten, aber es sind noch keine API-Schlüssel (Groq/Gemini) in Render hinterlegt.", "System-Fallback"
-
-    response_text = f"Echo: Ich habe deine Nachricht erhalten: '{user_text}'"
-    
-    if GROQ_API_KEY:
+    """Smarter Team-Router: Wenn Bild-Bytes da sind -> Direkt zu Gemini (Vision). Nur Text -> Versucht Groq (mit Timeout), ätgert Groq, übernimmt Gemini."""
+    if image_bytes:
+        print("Echte Bilddaten vorhanden -> Direkt zu Gemini.", flush=True)
+        return call_gemini(history, image_bytes=image_bytes)
+        
+    def try_groq():
+        return call_groq_openai(history)
+        
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(try_groq)
         try:
-            headers = {
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "llama3-70b-8192",
-                "messages": [{"role": "user", "content": user_text}]
-            }
-            res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=15)
-            if res.status_code == 200:
-                data = res.json()
-                response_text = data["choices"][0]["message"]["content"]
-                return response_text, "Groq (Llama3)"
-            else:
-                print(f"Groq API Fehler Status {res.status_code}: {res.text}", flush=True)
+            resp, model_name = future.result(timeout=2.0)
+            if resp:
+                return resp, model_name
+        except concurrent.futures.TimeoutError:
+            print("Groq hat geglättet (>2s Timeout). Gemini springt ein!", flush=True)
         except Exception as e:
-            print(f"Groq API Exception: {e}", flush=True)
-
-    return response_text, "Standard-Antwort"
-
-@app.route("/", methods=["GET"])
-def index():
-    return "Bot is running and alive!", 200
+            print(f"Groq Fehler: {e}. Gemini übernimmt.", flush=True)
+            
+    print("Fallback greift -> Gemini übernimmt.", flush=True)
+    resp, model_name = call_gemini(history, image_bytes=image_bytes)
+    if resp:
+        return resp, model_name
+        
+    return "Entschuldigung, im Moment sind alle Leitungen überlastet.", "System-Fallback"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -135,6 +188,10 @@ def webhook():
         print(f"KRITISCHER FEHLER IM WEBHOOK: {e}", flush=True)
         
     return "OK", 200
+
+@app.route("/ping", methods=["GET"])
+def ping_server():
+    return "Bot is awake and running!", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
