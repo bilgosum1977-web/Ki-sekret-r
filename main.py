@@ -26,15 +26,17 @@ user_balances = {}
 INITIAL_BALANCE = 10000
 MAX_HISTORY_LENGTH = 15
 
+# Erweiterter, hochintelligenter System-Prompt für proaktives Mitdenken und Kontext
 SYSTEM_PROMPT = (
-    "Du bist 'Ki Sekretär', ein hochkompetenter, proaktiver und ehrlicher KI-Assistent. "
-    "WICHTIG: Nutze KEINE internen Browser-Tools, Websuchen oder externe Funktionen. "
-    "Wenn du Live-Daten benötigst, werden dir diese bereits vom System im Chat bereitgestellt. "
+    "Du bist 'Ki Sekretär', ein hochkompetenter, proaktiver, mitdenkender und ehrlicher KI-Assistent. "
+    "KERN-REGEL ZUM KONTEXT: Du erinnerst dich exakt an den gesamten Gesprächsverlauf – sowohl an das, was der Nutzer gesagt hat, als auch an deine eigenen vorherigen Antworten. "
+    "Wenn der Nutzer kurze Befehle gibt (z. B. 'Plane es', 'Mach das', 'Mehr Details', 'Zeig mir mehr'), beziehe das IMMER intelligent und direkt auf den Inhalt der unmittelbar vorhergehenden Nachrichten (z. B. wenn vorher über Hotels in Istanbul gesprochen wurde, bedeutet 'Plane es' automatisch die Planung für diese Istanbul-Hotels). "
+    "PROAKTIVES HANDELN: Erkenne Muster, nimm dem Nutzer die Arbeit ab, erleichtere ihm Aufgaben, verschaffe ihm Vorteile, antizipiere Wünsche und beuge Problemen vor. Handle wie ein echter, mitdenkender Chef-Sekretär. "
+    "WICHTIG: Nutze KEINE internen Browser-Tools, Websuchen oder externe Funktionen. Wenn du Live-Daten benötigst, werden dir diese bereits vom System im Chat bereitgestellt. "
     "REGEL ZU KOSTEN: Alles, was mit reinem Wissen, Live-Suche oder Bildanalyse zu tun hat, ist für den Nutzer völlig kostenlos. "
     "Wenn der Nutzer verlangt, dass du aktiv wirst (z. B. externe Geschäfte anschreibst, Web-Scraping machst oder Verhandlungen führst), "
     "prüfe, ob das kostenpflichtige Dienste erfordert. Wenn ja, antworte direkt: "
-    "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?' "
-    "Ergreife ansonsten proaktiv die Initiative und frage, ob du bei der Umsetzung helfen sollst."
+    "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?'"
 )
 
 def clean_think_tags(text):
@@ -45,7 +47,7 @@ def clean_think_tags(text):
 def send_telegram_message(chat_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
-    # Zeige das Team-/Quellen-Tag NUR für dich als Admin an!
+    # Zeige das Team-/Quellen-Tag NUR für dich als Admin an
     if str(chat_id) == ADMIN_USER_ID and model_name:
         final_text = f"{text}\n\n[Team: {model_name}]"
     else:
@@ -67,7 +69,6 @@ def send_telegram_message(chat_id, text, model_name=""):
 def edit_telegram_message(chat_id, message_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
     
-    # Auch beim Bearbeiten das Tag nur für den Admin einblenden
     if str(chat_id) == ADMIN_USER_ID and model_name:
         final_text = f"{text}\n\n[Team: {model_name}]"
     else:
@@ -115,7 +116,7 @@ def call_groq_text(history, search_context=None):
         if search_context:
             messages.append({
                 "role": "system", 
-                "content": f"Hier sind aktuelle Live-Suchergebnisse aus dem Internet von unserer Websuche:\n{search_context}\nNutze diese Informationen, um die Frage des Nutzers präzise zu beantworten."
+                "content": f"Aktuelle Live-Suchergebnisse aus dem Internet:\n{search_context}\nNutze diese Infos, um deine proaktive Antwort zu bereichern."
             })
             
         messages.extend(history)
@@ -236,4 +237,4 @@ def ping_server():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(0.0.0.0, port=port)
