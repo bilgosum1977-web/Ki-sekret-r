@@ -7,6 +7,7 @@ from groq import Groq
 import requests
 from PIL import Image
 from rembg import remove
+from duckduckgo_search import DDGS  # Kostenlose Live-Suche ohne API-Key
 
 app = Flask(__name__)
 
@@ -18,9 +19,9 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Modelle
+# Modelle (gemäß deiner Architektur)
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
-GROQ_VISION_MODEL = "qwen/qwen3.6-27b"  # oder ein passendes Groq Vision Modell
+GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
 # Lokaler Speicher für Chats & Guthaben
 chat_histories = {}
@@ -63,7 +64,7 @@ def edit_telegram_message(chat_id, message_id, text, model_name=""):
         print(f"Fehler beim Bearbeiten der Telegram-Nachricht: {e}", flush=True)
 
 def send_telegram_photo(chat_id, photo_bytes, caption=""):
-    """Sendet ein bearbeitetes/generiertes Bild direkt an den Telegram-Chat."""
+    """Sendet ein bearbeitetes Bild direkt an den Telegram-Chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.png", photo_bytes, "image/png")}
     data = {"chat_id": chat_id, "caption": caption}
@@ -89,10 +90,30 @@ def get_telegram_file_bytes(file_id):
         print(f"Fehler beim Herunterladen des Telegram-Bildes: {e}", flush=True)
         return None
 
-def call_groq_text(history):
-    """Ruft Groq für reinen Text auf."""
+def search_web(query):
+    """Führt eine kostenlose Live-Suche ohne API-Key über DuckDuckGo durch."""
     try:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+        with DDGS() as ddgs:
+            results = [r for r in ddgs.text(query, max_results=3)]
+            snippets = [f"- {item['title']}: {item['body']} ({item['href']})" for item in results]
+            return "\n".join(snippets)
+    except Exception as e:
+        print(f"Web Search Fehler: {e}", flush=True)
+    return None
+
+def call_groq_text(history, search_context=None):
+    """Ruft Groq für reinen Text auf (optional mit Live-Suchergebnissen)."""
+    try:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        
+        if search_context:
+            messages.append({
+                "role": "system", 
+                "content": f"Hier sind aktuelle Live-Suchergebnisse aus dem Internet:\n{search_context}\nNutze diese Informationen, um die Frage des Nutzers zu beantworten."
+            })
+            
+        messages.extend(history)
+        
         response = groq_client.chat.completions.create(
             model=GROQ_TEXT_MODEL,
             messages=messages,
@@ -100,7 +121,9 @@ def call_groq_text(history):
             max_tokens=1024
         )
         reply = response.choices[0].message.content
-        return reply, f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
+        
+        model_tag = "Groq (Live-Suche)" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
+        return reply, model_tag
     except Exception as e:
         print(f"Groq Text Fehler: {e}", flush=True)
         return f"Groq API Fehler: {e}", "Groq (Fehler)"
@@ -128,13 +151,13 @@ def call_groq_vision(user_text, image_bytes):
             max_tokens=1024
         )
         reply = response.choices[0].message.content
-        return reply, "Groq (Vision)"
+        return reply, "Groq OSS-20B (Vision)"
     except Exception as e:
         print(f"Groq Vision Fehler: {e}", flush=True)
         return f"Groq Vision API Fehler: {e}", "Groq (Fehler)"
 
 def process_image_with_rembg(image_bytes):
-    """Entfernt lokal den Hintergrund mit RemBG (Pillow + RemBG)."""
+    """Entfernt lokal den Hintergrund mit Pillow + RemBG."""
     try:
         input_image = Image.open(io.BytesIO(image_bytes))
         output_image = remove(input_image)
@@ -158,13 +181,12 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             
         lower_text = user_text.lower() if user_text else ""
         
-        # Prüfen, ob der Nutzer eine Bildbearbeitung (Hintergrund entfernen) wünscht
+        # 1. Bildbearbeitung (RemBG)
         if image_bytes is not None and any(cmd in lower_text for cmd in ["freistellen", "hintergrund entfernen", "ohne hintergrund"]):
             print("Starte lokale Bildbearbeitung (RemBG)...", flush=True)
             processed_bytes = process_image_with_rembg(image_bytes)
             if processed_bytes:
-                # Lade-Nachricht löschen und das bearbeitete Bild senden
-                send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG (Freigestellt)]")
+                send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG]")
                 return
             else:
                 edit_telegram_message(chat_id, loading_msg_id, "Fehler bei der Bildfreistellung.", model_name="RemBG")
@@ -176,13 +198,19 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
             chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
             
-        # Entweder Bildanalyse oder Text-Antwort über Groq
+        # 2. Bildanalyse oder Live-Suche / Text
         if image_bytes is not None:
             print("Leite Bild an Groq Vision weiter...", flush=True)
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
+            # Automatische Live-Suche bei bestimmten Schlüsselwörtern
+            search_context = None
+            if any(keyword in lower_text for keyword in ["aktuell", "heute", "nachrichten", "wetter", "suche", "wer ist", "was ist"]):
+                print(f"Führe Live-Websuche aus für: {user_text}", flush=True)
+                search_context = search_web(user_text)
+                
             print("Leite Text an Groq weiter...", flush=True)
-            bot_reply, used_model_name = call_groq_text(chat_histories[chat_id])
+            bot_reply, used_model_name = call_groq_text(chat_histories[chat_id], search_context=search_context)
             
         if not bot_reply:
             bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
