@@ -7,7 +7,7 @@ from groq import Groq
 import requests
 from PIL import Image
 from rembg import remove
-from duckduckgo_search import DDGS  # Kostenlose Live-Suche ohne API-Key
+from duckduckgo_search import DDGS
 
 app = Flask(__name__)
 
@@ -19,7 +19,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Modelle (gemäß deiner Architektur)
+# Modelle
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
@@ -33,6 +33,12 @@ SYSTEM_PROMPT = (
     "Du bist 'Ki Sekretär', ein hochkompetenter, freundlicher und effizienter KI-Assistent. "
     "Antworte präzise, professionell und auf den Punkt."
 )
+
+def clean_think_tags(text):
+    """Entfernt den <think>...</think>-Block aus der KI-Antwort, falls vorhanden."""
+    if "</think>" in text:
+        return text.split("</think>")[-1].strip()
+    return text
 
 def send_telegram_message(chat_id, text, model_name=""):
     """Sendet die formatierte Antwort an den Telegram-Chat und gibt die message_id zurück."""
@@ -121,6 +127,7 @@ def call_groq_text(history, search_context=None):
             max_tokens=1024
         )
         reply = response.choices[0].message.content
+        reply = clean_think_tags(reply)  # Denk-Tags entfernen
         
         model_tag = "Groq (Live-Suche)" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
         return reply, model_tag
@@ -151,6 +158,8 @@ def call_groq_vision(user_text, image_bytes):
             max_tokens=1024
         )
         reply = response.choices[0].message.content
+        reply = clean_think_tags(reply)  # Denk-Tags entfernen
+        
         return reply, "Groq OSS-20B (Vision)"
     except Exception as e:
         print(f"Groq Vision Fehler: {e}", flush=True)
@@ -203,7 +212,6 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             print("Leite Bild an Groq Vision weiter...", flush=True)
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
-            # Automatische Live-Suche bei bestimmten Schlüsselwörtern
             search_context = None
             if any(keyword in lower_text for keyword in ["aktuell", "heute", "nachrichten", "wetter", "suche", "wer ist", "was ist"]):
                 print(f"Führe Live-Websuche aus für: {user_text}", flush=True)
