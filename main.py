@@ -86,6 +86,17 @@ def call_gemini(history, image_bytes=None):
             system_instruction=SYSTEM_PROMPT
         )
         
+        # Wenn ein Bild da ist, nutzen wir direkte Generierung mit Bild-Support
+        if image_bytes:
+            image_part = {
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            }
+            prompt_text = history[-1]["content"] if history else "Was ist auf diesem Bild zu sehen?"
+            response = model.generate_content([prompt_text, image_part])
+            return response.text, f"Gemini ({GEMINI_MODEL})"
+        
+        # Für reinen Text mit Historie über Chat
         gemini_history = []
         for msg in history[:-1]:
             role = "user" if msg["role"] == "user" else "model"
@@ -93,15 +104,7 @@ def call_gemini(history, image_bytes=None):
             
         chat = model.start_chat(history=gemini_history)
         last_message = history[-1]["content"] if history else "Hallo"
-        
-        if image_bytes:
-            image_part = {
-                "mime_type": "image/jpeg",
-                "data": image_bytes
-            }
-            response = chat.send_message([last_message, image_part])
-        else:
-            response = chat.send_message(last_message)
+        response = chat.send_message(last_message)
             
         return response.text, f"Gemini ({GEMINI_MODEL})"
     except Exception as e:
@@ -109,17 +112,15 @@ def call_gemini(history, image_bytes=None):
         return None, None
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """Smarter Team-Router: Bilder gehen AUSSCHLIESSLICH zu Gemini. Reiner Text nutzt Groq mit Fallback auf Gemini."""
+    """Smarter Team-Router: Bilder gehen direkt zu Gemini. Reiner Text nutzt Groq mit Fallback."""
     
-    # KORREKTUR: Wenn ein Bild gesendet wurde, darf Groq gar nicht erst gefragt werden!
     if image_bytes is not None:
         print("Bild erkannt -> Leite direkt an Gemini (Vision) weiter.", flush=True)
         resp, model_name = call_gemini(history, image_bytes=image_bytes)
         if resp:
             return resp, model_name
-        return "Entschuldigung, ich konnte das Bild leider nicht analysieren.", "Gemini (Fehler)"
+        return "Entschuldigung, ich konnte das Bild wegen eines Verarbeitungsfehlers nicht analysieren.", "Gemini (Fehler)"
 
-    # Nur bei reinem Text versuchen wir Groq mit Timeout
     def try_groq():
         return call_groq_openai(history)
         
