@@ -15,15 +15,12 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = "8818900840:AAHfyoscsxqiv1wez9qtZfb1b5PbhP1YBjY"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Groq Client initialisieren
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Modelle
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
-# Lokaler Speicher für Chats & Guthaben
 chat_histories = {}
 user_balances = {}
 INITIAL_BALANCE = 10000
@@ -40,13 +37,11 @@ SYSTEM_PROMPT = (
 )
 
 def clean_think_tags(text):
-    """Entfernt den <think>...</think>-Block aus der KI-Antwort, falls vorhanden."""
     if "</think>" in text:
         return text.split("</think>")[-1].strip()
     return text
 
 def send_telegram_message(chat_id, text, model_name=""):
-    """Sendet die formatierte Antwort an den Telegram-Chat und gibt die message_id zurück."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -62,7 +57,6 @@ def send_telegram_message(chat_id, text, model_name=""):
     return None
 
 def edit_telegram_message(chat_id, message_id, text, model_name=""):
-    """Aktualisiert eine bestehende Nachricht."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
     payload = {
         "chat_id": chat_id,
@@ -75,34 +69,28 @@ def edit_telegram_message(chat_id, message_id, text, model_name=""):
         print(f"Fehler beim Bearbeiten der Telegram-Nachricht: {e}", flush=True)
 
 def send_telegram_photo(chat_id, photo_bytes, caption=""):
-    """Sendet ein bearbeitetes Bild direkt an den Telegram-Chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.png", photo_bytes, "image/png")}
     data = {"chat_id": chat_id, "caption": caption}
     try:
-        response = requests.post(url, data=data, files=files, timeout=15)
-        print(f"Telegram Foto-Sende-Antwort Status: {response.status_code}", flush=True)
+        requests.post(url, data=data, files=files, timeout=15)
     except Exception as e:
         print(f"Fehler beim Telegram-Foto-Senden: {e}", flush=True)
 
 def get_telegram_file_bytes(file_id):
-    """Lädt ein Bild direkt von den Telegram-Servern herunter."""
     try:
         file_info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
         r = requests.get(file_info_url, timeout=5).json()
         if not r.get("ok"):
             return None
         file_path = r["result"]["file_path"]
-        
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-        img_data = requests.get(file_url, timeout=10).content
-        return img_data
+        return requests.get(file_url, timeout=10).content
     except Exception as e:
         print(f"Fehler beim Herunterladen des Telegram-Bildes: {e}", flush=True)
         return None
 
 def search_web(query):
-    """Führt eine kostenlose Live-Suche ohne API-Key über DuckDuckGo durch."""
     try:
         with DDGS() as ddgs:
             results = [r for r in ddgs.text(query, max_results=3)]
@@ -113,7 +101,6 @@ def search_web(query):
     return None
 
 def call_groq_text(history, search_context=None):
-    """Ruft Groq für reinen Text auf (optional mit Live-Suchergebnissen)."""
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         
@@ -129,7 +116,8 @@ def call_groq_text(history, search_context=None):
             model=GROQ_TEXT_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=1024
+            max_tokens=1024,
+            tool_choice="none"  # Verhindert, dass das Modell interne Tools aufruft
         )
         reply = response.choices[0].message.content
         reply = clean_think_tags(reply)
@@ -141,26 +129,23 @@ def call_groq_text(history, search_context=None):
         return f"Groq API Fehler: {e}", "Groq (Fehler)"
 
 def call_groq_vision(user_text, image_bytes):
-    """Analysiert Bilder über Groq Vision."""
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         image_url = f"data:image/jpeg;base64,{base64_image}"
-        
         prompt = user_text if user_text else "Was ist auf diesem Bild zu sehen?"
         
         response = groq_client.chat.completions.create(
             model=GROQ_VISION_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    ]
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ]
+            }],
             temperature=0.5,
-            max_tokens=1024
+            max_tokens=1024,
+            tool_choice="none"
         )
         reply = response.choices[0].message.content
         reply = clean_think_tags(reply)
@@ -171,11 +156,9 @@ def call_groq_vision(user_text, image_bytes):
         return f"Groq Vision API Fehler: {e}", "Groq (Fehler)"
 
 def process_image_with_rembg(image_bytes):
-    """Entfernt lokal den Hintergrund mit Pillow + RemBG."""
     try:
         input_image = Image.open(io.BytesIO(image_bytes))
         output_image = remove(input_image)
-        
         output_io = io.BytesIO()
         output_image.save(output_io, format="PNG")
         output_io.seek(0)
@@ -185,19 +168,15 @@ def process_image_with_rembg(image_bytes):
         return None
 
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
-    """Verarbeitet die Nachricht im Hintergrund."""
     try:
         if chat_id not in user_balances:
             user_balances[chat_id] = INITIAL_BALANCE
-            
         if chat_id not in chat_histories:
             chat_histories[chat_id] = []
             
         lower_text = user_text.lower() if user_text else ""
         
-        # 1. Bildbearbeitung (RemBG) - Kostenlos
         if image_bytes is not None and any(cmd in lower_text for cmd in ["freistellen", "hintergrund entfernen", "ohne hintergrund"]):
-            print("Starte lokale Bildbearbeitung (RemBG)...", flush=True)
             processed_bytes = process_image_with_rembg(image_bytes)
             if processed_bytes:
                 send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG - Kostenlos]")
@@ -212,20 +191,14 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
             chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
             
-        # 2. Bildanalyse oder Live-Suche / Text
+        search_context = None
+        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs"]
+        
         if image_bytes is not None:
-            print("Leite Bild an Groq Vision weiter...", flush=True)
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
-            # Automatische Live-Suche für Echtzeit-Daten
-            search_context = None
-            live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs"]
-            
             if any(trigger in lower_text for trigger in live_triggers):
-                print(f"Automatische Live-Websuche für: {user_text}", flush=True)
                 search_context = search_web(user_text)
-                
-            print("Leite Text an Groq weiter...", flush=True)
             bot_reply, used_model_name = call_groq_text(chat_histories[chat_id], search_context=search_context)
             
         if not bot_reply:
@@ -246,7 +219,6 @@ def webhook():
             
         message = data["message"]
         chat_id = str(message["chat"]["id"])
-        
         user_text = message.get("text", message.get("caption", ""))
         image_bytes = None
         
