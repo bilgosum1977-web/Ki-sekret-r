@@ -37,7 +37,7 @@ def webhook():
       "Content-Type": "application/json",
   }
   payload = {
-      "model": "llama-3-8b-8192",
+      "model": "openai/gpt-oss-20b",
       "messages": [{"role": "user", "content": user_text}],
   }
 
