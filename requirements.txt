@@ -1,5 +1,8 @@
 flask
-requests
 groq
-google-generativeai
+requests
+Pillow
+rembg
+duckduckgo_search
+
 
