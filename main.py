@@ -105,13 +105,16 @@ def generate_image_with_gemini(prompt_text):
         print(f"Bildgenerierungs-Fehler: {e}", flush=True)
     return None
 
-def call_gemini(history, image_bytes=None):
-    """Ruft Gemini mit aktivierter Google-Suche (Grounding) und Bildanalyse auf."""
+def call_gemini(history, image_bytes=None, enable_search=False):
+    """Ruft Gemini auf – wahlweise mit aktivierter nativer Google-Suche oder Bildanalyse."""
     try:
+        # Natives Google-Search-Tool korrekt definieren
+        tools = [{"google_search": {}}] if enable_search else None
+        
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
             system_instruction=SYSTEM_PROMPT,
-            tools=[{"google_search": {}}]
+            tools=tools
         )
         
         if image_bytes:
@@ -121,7 +124,8 @@ def call_gemini(history, image_bytes=None):
                 "data": image_bytes
             }
             response = model.generate_content([prompt_text, image_content])
-            return response.text, f"Gemini ({GEMINI_MODEL} + Websuche)"
+            tag = "Gemini (Vision + Websuche)" if enable_search else f"Gemini ({GEMINI_MODEL})"
+            return response.text, tag
         
         gemini_history = []
         for msg in history[:-1]:
@@ -132,31 +136,34 @@ def call_gemini(history, image_bytes=None):
         last_message = history[-1]["content"] if history else "Hallo"
         response = chat.send_message(last_message)
             
-        return response.text, f"Gemini ({GEMINI_MODEL} + Websuche)"
+        tag = f"Gemini ({GEMINI_MODEL} + Google Suche)" if enable_search else f"Gemini ({GEMINI_MODEL})"
+        return response.text, tag
     except Exception as e:
         error_msg = str(e)
         print(f"Gemini Detail-Fehler: {error_msg}", flush=True)
         return f"Gemini API Fehler: {error_msg}", "Gemini (Fehler)"
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """Smarter Team-Router mit Bildgenerierungs- und Websuche-Erkennung."""
-    if image_bytes is not None:
-        print("Bild erkannt -> Leite direkt an Gemini weiter.", flush=True)
-        return call_gemini(history, image_bytes=image_bytes)
-
+    """Smarter Team-Router mit Bildgenerierungs- und Live-Websuch-Erkennung."""
     lower_text = user_text.lower()
     
-    # 1. Bildgenerierung prüfen
+    # 1. Bild erkannt -> Direkt an Gemini (mit optionaler Websuche bei Fragen zum Bild)
+    if image_bytes is not None:
+        print("Bild erkannt -> Leite direkt an Gemini weiter.", flush=True)
+        needs_search = any(w in lower_text for w in ["nachrichten", "heute", "aktuell", "wetter", "suche", "wer ist", "was ist"])
+        return call_gemini(history, image_bytes=image_bytes, enable_search=needs_search)
+
+    # 2. Bildgenerierung prüfen
     if any(cmd in lower_text for cmd in ["erstelle ein bild", "generiere ein bild", "male ein bild", "zeichne"]):
         print("Bildgenerierungs-Befehl erkannt!", flush=True)
         img_bytes = generate_image_with_gemini(user_text)
         if img_bytes:
             return "__IMAGE_GENERATED__", img_bytes, f"Gemini (Imagen 3)"
 
-    # 2. Wenn nach aktuellen Infos / Websuche gefragt wird direkt zu Gemini
-    if any(w in lower_text for w in ["nachrichten", "heute", "aktuell", "wetter", "suche"]):
-        print("Aktuelle Info angefragt -> Gemini mit Websuche übernimmt.", flush=True)
-        return call_gemini(history, image_bytes=None)
+    # 3. Aktuelle Infos / Websuche angefragt -> Direkt zu Gemini mit nativer Google-Suche
+    if any(w in lower_text for w in ["nachrichten", "heute", "aktuell", "wetter", "suche", "wer ist", "was ist"]):
+        print("Aktuelle Info angefragt -> Aktiviere native Google-Suche für Gemini.", flush=True)
+        return call_gemini(history, image_bytes=None, enable_search=True)
 
     def try_groq():
         return call_groq_openai(history)
@@ -173,7 +180,7 @@ def smart_route_message(history, user_text, image_bytes=None):
             print(f"Groq Fehler: {e}. Gemini übernimmt.", flush=True)
             
     print("Fallback greift -> Gemini übernimmt.", flush=True)
-    return call_gemini(history, image_bytes=None)
+    return call_gemini(history, image_bytes=None, enable_search=False)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
