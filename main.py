@@ -1,26 +1,26 @@
 import os
+import io
+import base64
 import concurrent.futures
 from flask import Flask, request
 from groq import Groq
-import google.generativeai as genai
 import requests
+from PIL import Image
+from rembg import remove
 
 app = Flask(__name__)
 
 # --- Konfiguration & API-Schlüssel ---
 TELEGRAM_BOT_TOKEN = "8818900840:AAHfyoscsxqiv1wez9qtZfb1b5PbhP1YBjY"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# SDK Clients initialisieren
+# Groq Client initialisieren
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
-# Modell-Namen
-GROQ_MODEL = "openai/gpt-oss-20b"
-GEMINI_MODEL = "gemini-3.7-flash"
+# Modelle
+GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
+GROQ_VISION_MODEL = "qwen/qwen3.6-27b"  # oder ein passendes Groq Vision Modell
 
 # Lokaler Speicher für Chats & Guthaben
 chat_histories = {}
@@ -30,7 +30,7 @@ MAX_HISTORY_LENGTH = 15
 
 SYSTEM_PROMPT = (
     "Du bist 'Ki Sekretär', ein hochkompetenter, freundlicher und effizienter KI-Assistent. "
-    "Du agierst als Teil eines engen KI-Teams. Antworte präzise, professionell und auf den Punkt."
+    "Antworte präzise, professionell und auf den Punkt."
 )
 
 def send_telegram_message(chat_id, text, model_name=""):
@@ -50,7 +50,7 @@ def send_telegram_message(chat_id, text, model_name=""):
     return None
 
 def edit_telegram_message(chat_id, message_id, text, model_name=""):
-    """Aktualisiert eine bestehende Nachricht (z.B. wenn das Ergebnis da ist)."""
+    """Aktualisiert eine bestehende Nachricht."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
     payload = {
         "chat_id": chat_id,
@@ -63,9 +63,9 @@ def edit_telegram_message(chat_id, message_id, text, model_name=""):
         print(f"Fehler beim Bearbeiten der Telegram-Nachricht: {e}", flush=True)
 
 def send_telegram_photo(chat_id, photo_bytes, caption=""):
-    """Sendet ein generiertes Bild direkt an den Telegram-Chat."""
+    """Sendet ein bearbeitetes/generiertes Bild direkt an den Telegram-Chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("image.jpg", photo_bytes, "image/jpeg")}
+    files = {"photo": ("image.png", photo_bytes, "image/png")}
     data = {"chat_id": chat_id, "caption": caption}
     try:
         response = requests.post(url, data=data, files=files, timeout=15)
@@ -89,105 +89,66 @@ def get_telegram_file_bytes(file_id):
         print(f"Fehler beim Herunterladen des Telegram-Bildes: {e}", flush=True)
         return None
 
-def call_groq_openai(history):
+def call_groq_text(history):
     """Ruft Groq für reinen Text auf."""
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
         response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=GROQ_TEXT_MODEL,
             messages=messages,
             temperature=0.7,
             max_tokens=1024
         )
         reply = response.choices[0].message.content
-        return reply, f"Groq ({GROQ_MODEL.split('/')[-1]})"
+        return reply, f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
     except Exception as e:
-        print(f"Groq Fehler: {e}", flush=True)
-        return None, None
+        print(f"Groq Text Fehler: {e}", flush=True)
+        return f"Groq API Fehler: {e}", "Groq (Fehler)"
 
-def generate_image_with_gemini(prompt_text):
-    """Generiert ein Bild über Googles Imagen-Modell und gibt die Bytes zurück."""
+def call_groq_vision(user_text, image_bytes):
+    """Analysiert Bilder über Groq Vision."""
     try:
-        result = genai.generate_images(
-            model='imagen-3.0-generate-002',
-            prompt=prompt_text,
-            number_of_images=1,
-            output_mime_type="image/jpeg",
-            aspect_ratio="1:1"
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        image_url = f"data:image/jpeg;base64,{base64_image}"
+        
+        prompt = user_text if user_text else "Was ist auf diesem Bild zu sehen?"
+        
+        response = groq_client.chat.completions.create(
+            model=GROQ_VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                }
+            ],
+            temperature=0.5,
+            max_tokens=1024
         )
-        for generated_image in result.generated_images:
-            return generated_image.image.image_bytes
+        reply = response.choices[0].message.content
+        return reply, "Groq (Vision)"
     except Exception as e:
-        print(f"Bildgenerierungs-Fehler: {e}", flush=True)
-    return None
+        print(f"Groq Vision Fehler: {e}", flush=True)
+        return f"Groq Vision API Fehler: {e}", "Groq (Fehler)"
 
-def call_gemini(history, image_bytes=None):
-    """Ruft Gemini auf – optimiert für Bildanalysen und stabile Antworten."""
+def process_image_with_rembg(image_bytes):
+    """Entfernt lokal den Hintergrund mit RemBG (Pillow + RemBG)."""
     try:
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=SYSTEM_PROMPT
-        )
+        input_image = Image.open(io.BytesIO(image_bytes))
+        output_image = remove(input_image)
         
-        if image_bytes:
-            prompt_text = history[-1]["content"] if history else "Was ist auf diesem Bild zu sehen?"
-            image_content = {
-                "mime_type": "image/jpeg",
-                "data": image_bytes
-            }
-            response = model.generate_content([prompt_text, image_content])
-            return response.text, "Gemini (Vision)"
-        
-        gemini_history = []
-        for msg in history[:-1]:
-            role = "user" if msg["role"] == "user" else "model"
-            gemini_history.append({"role": role, "parts": [msg["content"]]})
-            
-        chat = model.start_chat(history=gemini_history)
-        last_message = history[-1]["content"] if history else "Hallo"
-        response = chat.send_message(last_message)
-            
-        return response.text, f"Gemini ({GEMINI_MODEL})"
+        output_io = io.BytesIO()
+        output_image.save(output_io, format="PNG")
+        output_io.seek(0)
+        return output_io.read()
     except Exception as e:
-        error_msg = str(e)
-        print(f"Gemini Detail-Fehler: {error_msg}", flush=True)
-        return f"Gemini API Fehler: {error_msg}", "Gemini (Fehler)"
-
-def smart_route_message(history, user_text, image_bytes=None):
-    """Smarter Team-Router mit Bildgenerierungs- und Vision-Erkennung."""
-    lower_text = user_text.lower()
-    
-    # 1. Bild erkannt -> Direkt an Gemini (Vision)
-    if image_bytes is not None:
-        print("Bild erkannt -> Leite direkt an Gemini (Vision) weiter.", flush=True)
-        return call_gemini(history, image_bytes=image_bytes)
-
-    # 2. Bildgenerierung prüfen
-    if any(cmd in lower_text for cmd in ["erstelle ein bild", "generiere ein bild", "male ein bild", "zeichne"]):
-        print("Bildgenerierungs-Befehl erkannt!", flush=True)
-        img_bytes = generate_image_with_gemini(user_text)
-        if img_bytes:
-            return "__IMAGE_GENERATED__", img_bytes, "Gemini (Imagen 3)"
-
-    def try_groq():
-        return call_groq_openai(history)
-        
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(try_groq)
-        try:
-            resp, model_name = future.result(timeout=2.0)
-            if resp:
-                return resp, model_name
-        except concurrent.futures.TimeoutError:
-            print("Groq Timeout (>2s). Gemini springt ein!", flush=True)
-        except Exception as e:
-            print(f"Groq Fehler: {e}. Gemini übernimmt.", flush=True)
-            
-    print("Fallback greift -> Gemini übernimmt.", flush=True)
-    return call_gemini(history, image_bytes=None)
+        print(f"RemBG Fehler: {e}", flush=True)
+        return None
 
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
-    """Verarbeitet die Nachricht im Hintergrund und aktualisiert die Lade-Nachricht."""
+    """Verarbeitet die Nachricht im Hintergrund."""
     try:
         if chat_id not in user_balances:
             user_balances[chat_id] = INITIAL_BALANCE
@@ -195,33 +156,39 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         if chat_id not in chat_histories:
             chat_histories[chat_id] = []
             
+        lower_text = user_text.lower() if user_text else ""
+        
+        # Prüfen, ob der Nutzer eine Bildbearbeitung (Hintergrund entfernen) wünscht
+        if image_bytes is not None and any(cmd in lower_text for cmd in ["freistellen", "hintergrund entfernen", "ohne hintergrund"]):
+            print("Starte lokale Bildbearbeitung (RemBG)...", flush=True)
+            processed_bytes = process_image_with_rembg(image_bytes)
+            if processed_bytes:
+                # Lade-Nachricht löschen und das bearbeitete Bild senden
+                send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG (Freigestellt)]")
+                return
+            else:
+                edit_telegram_message(chat_id, loading_msg_id, "Fehler bei der Bildfreistellung.", model_name="RemBG")
+                return
+
         content_desc = user_text if user_text else "[Bild gesendet]"
         chat_histories[chat_id].append({"role": "user", "content": content_desc})
         
         if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
             chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
             
-        current_history = chat_histories[chat_id]
-        
-        print(f"Starte Smart Routing im Hintergrund... Text: '{user_text}'", flush=True)
-        routing_result = smart_route_message(current_history, user_text, image_bytes=image_bytes)
-        
-        # Fall A: Bild wurde generiert
-        if len(routing_result) == 3 and routing_result[0] == "__IMAGE_GENERATED__":
-            _, generated_img_bytes, used_model_name = routing_result
-            # Lade-Nachricht löschen oder durch Text ersetzen falls gewünscht, hier senden wir das Foto
-            caption = f"Dein generiertes Bild\n\n[Team: {used_model_name}]"
-            send_telegram_photo(chat_id, generated_img_bytes, caption=caption)
-            chat_histories[chat_id].append({"role": "assistant", "content": "[Bild generiert und gesendet]"})
-            
-        # Fall B: Normale Text- / Medien-Antwort
+        # Entweder Bildanalyse oder Text-Antwort über Groq
+        if image_bytes is not None:
+            print("Leite Bild an Groq Vision weiter...", flush=True)
+            bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
-            bot_reply, used_model_name = routing_result
-            if not bot_reply:
-                bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
-            chat_histories[chat_id].append({"role": "assistant", "content": bot_reply})
-            # Statt neuer Nachricht aktualisieren wir die bestehende Lade-Nachricht!
-            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
+            print("Leite Text an Groq weiter...", flush=True)
+            bot_reply, used_model_name = call_groq_text(chat_histories[chat_id])
+            
+        if not bot_reply:
+            bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
+            
+        chat_histories[chat_id].append({"role": "assistant", "content": bot_reply})
+        edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
             
     except Exception as e:
         print(f"FEHLER IN BACKGROUND WORKER: {e}", flush=True)
@@ -249,12 +216,9 @@ def webhook():
         if not user_text and not image_bytes:
             return "OK", 200
             
-        # Sofort eine sichtbare Status-Nachricht senden ("Analysiere..." / "Verarbeite..."), 
-        # damit Telegram sofort eine Antwort bekommt und kein zweites Mal triggert!
         loading_text = "Analysiere das Bild..." if image_bytes else "Verarbeite Anfrage..."
         loading_msg_id = send_telegram_message(chat_id, loading_text)
         
-        # Starte die echte KI-Verarbeitung im Hintergrund
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         executor.submit(process_message_async, chat_id, user_text, image_bytes, loading_msg_id)
         
