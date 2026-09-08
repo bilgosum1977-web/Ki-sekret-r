@@ -7,7 +7,7 @@ import requests
 
 app = Flask(__name__)
 
-# --- 1. Konfiguration & API-Schlüssel ---
+# --- Konfiguration & API-Schlüssel ---
 TELEGRAM_BOT_TOKEN = "8818900840:AAHfyoscsxqiv1wez9qtZfb1b5PbhP1YBjY"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -18,9 +18,9 @@ if GROQ_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Modell-Namen nach deiner Vorgabe
-GROQ_MODEL = "openai/gpt-oss-20b"   # Dein gewähltes Groq-Modell
-GEMINI_MODEL = "gemini-1.5-flash"   # Der Vision- & Websuche-Spezialist
+# Modell-Namen
+GROQ_MODEL = "openai/gpt-oss-20b"
+GEMINI_MODEL = "gemini-1.5-flash"
 
 # Lokaler Speicher für Chats & Guthaben
 chat_histories = {}
@@ -63,7 +63,7 @@ def get_telegram_file_bytes(file_id):
         return None
 
 def call_groq_openai(history):
-    """Ruft Groq mit dem Modell openai/gpt-oss-20b für Text auf."""
+    """Ruft Groq für reinen Text auf."""
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
         response = groq_client.chat.completions.create(
@@ -109,11 +109,17 @@ def call_gemini(history, image_bytes=None):
         return None, None
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """Smarter Team-Router: Wenn Bild-Bytes da sind -> Direkt zu Gemini (Vision). Nur Text -> Versucht Groq (mit Timeout), ätgert Groq, übernimmt Gemini."""
-    if image_bytes:
-        print("Echte Bilddaten vorhanden -> Direkt zu Gemini.", flush=True)
-        return call_gemini(history, image_bytes=image_bytes)
-        
+    """Smarter Team-Router: Bilder gehen AUSSCHLIESSLICH zu Gemini. Reiner Text nutzt Groq mit Fallback auf Gemini."""
+    
+    # KORREKTUR: Wenn ein Bild gesendet wurde, darf Groq gar nicht erst gefragt werden!
+    if image_bytes is not None:
+        print("Bild erkannt -> Leite direkt an Gemini (Vision) weiter.", flush=True)
+        resp, model_name = call_gemini(history, image_bytes=image_bytes)
+        if resp:
+            return resp, model_name
+        return "Entschuldigung, ich konnte das Bild leider nicht analysieren.", "Gemini (Fehler)"
+
+    # Nur bei reinem Text versuchen wir Groq mit Timeout
     def try_groq():
         return call_groq_openai(history)
         
@@ -124,12 +130,12 @@ def smart_route_message(history, user_text, image_bytes=None):
             if resp:
                 return resp, model_name
         except concurrent.futures.TimeoutError:
-            print("Groq hat geglättet (>2s Timeout). Gemini springt ein!", flush=True)
+            print("Groq Timeout (>2s). Gemini springt ein!", flush=True)
         except Exception as e:
             print(f"Groq Fehler: {e}. Gemini übernimmt.", flush=True)
             
     print("Fallback greift -> Gemini übernimmt.", flush=True)
-    resp, model_name = call_gemini(history, image_bytes=image_bytes)
+    resp, model_name = call_gemini(history, image_bytes=None)
     if resp:
         return resp, model_name
         
@@ -174,7 +180,7 @@ def webhook():
             
         current_history = chat_histories[chat_id]
         
-        print(f"Starte Smart Routing für Text: '{user_text}'...", flush=True)
+        print(f"Starte Smart Routing... Text: '{user_text}', Bild vorhanden: {image_bytes is not None}", flush=True)
         bot_reply, used_model_name = smart_route_message(current_history, user_text, image_bytes=image_bytes)
         print(f"KI Antwort erhalten: {bot_reply} von Modell: {used_model_name}", flush=True)
         
