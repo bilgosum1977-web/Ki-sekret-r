@@ -42,7 +42,7 @@ def call_groq_llama(history):
       "Authorization": f"Bearer {GROQ_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {"model": "llama-3.3-70b-versatile", "messages": history}
+  payload = {"model": "call_groq_llama", "messages": history}
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
