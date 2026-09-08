@@ -4,12 +4,12 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# API-Schlüssel aus den Render Environment Variables laden
+# API-Schlüssel aus den Render Environment Variables laden (Korrektur: separate Variablen)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GROK_API_KEY = os.getenv("GROK_API_KEY")
+XAI_GROK_API_KEY = os.getenv("GROK_API_KEY")  # Getrennt von Groq!
 APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")  # Optional
 
@@ -34,15 +34,16 @@ def send_telegram_message(chat_id, text):
 
 
 def call_groq_llama(history):
-  """Kostenloser Standard-Worker: Groq (Llama)"""
+  """Kostenloser Haupt-Worker: Groq (Llama)"""
   if not GROQ_API_KEY:
+    print("Groq API Key fehlt oder ist leer!")
     return None
   url = "https://api.groq.com/openai/v1/chat/completions"
   headers = {
       "Authorization": f"Bearer {GROQ_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {"model": "llama-3.2-3b-preview", "messages": history}
+  payload = {"model": "llama-3.1-70b-versatile", "messages": history}
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
@@ -55,10 +56,9 @@ def call_groq_llama(history):
 
 
 def call_gemini(history):
-  """Google Gemini (optimiert für AQ-Schlüsselformat)"""
+  """Google Gemini (Backup)"""
   if not GEMINI_API_KEY:
     return None
-
   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
   contents = []
   for msg in history:
@@ -79,12 +79,12 @@ def call_gemini(history):
 
 
 def call_grok(history):
-  """xAI Grok 4"""
-  if not GROK_API_KEY:
+  """xAI Grok 4 (Backup)"""
+  if not XAI_GROK_API_KEY:
     return None
   url = "https://api.x.ai/v1/chat/completions"
   headers = {
-      "Authorization": f"Bearer {GROK_API_KEY}",
+      "Authorization": f"Bearer {XAI_GROK_API_KEY}",
       "Content-Type": "application/json",
   }
   payload = {"model": "grok-4", "messages": history}
@@ -158,11 +158,9 @@ def webhook():
   if not user_text:
     return "OK", 200
 
-  # Guthaben initialisieren, falls neuer User
   if chat_id not in user_balances:
     user_balances[chat_id] = INITIAL_BALANCE
 
-  # Befehl zum Guthaben abfragen
   if user_text.lower() in ["/guthaben", "guthaben", "balance"]:
     send_telegram_message(
         chat_id,
@@ -183,7 +181,6 @@ def webhook():
   bot_reply = None
   text_lower = user_text.lower()
 
-  # 1. Aktive Premium-Aufgaben (Scraping oder Make) -> Kostenpflichtig (0.50 €)
   is_premium_request = (
       "scrape" in text_lower
       or "web durchsuchen" in text_lower
@@ -201,7 +198,6 @@ def webhook():
       )
       return "OK", 200
 
-    # Guthaben abziehen
     user_balances[chat_id] -= COST_PER_PREMIUM_TASK
 
     if "scrape" in text_lower or "web durchsuchen" in text_lower:
@@ -230,20 +226,18 @@ def webhook():
         except Exception as e:
           print(f"Make Webhook Fehler: {e}")
 
-  # 2. Normale Chat-Anfragen (IMMER KOSTENLOS!)
   else:
-    # Versuche zuerst Groq (Llama)
+    # Hier greift jetzt zuerst Llama (Groq)
     bot_reply = call_groq_llama(current_history)
 
-    # Wenn Groq ausfällt, nimm Gemini als kostenloses Backup
+    # Wenn Groq ausfällt, nimm Gemini
     if not bot_reply:
       bot_reply = call_gemini(current_history)
 
-    # Wenn auch das schlägt fehl, nimm Grok 4 als letzten Ausweg
+    # Wenn auch das ausfällt, nimm Grok 4
     if not bot_reply:
       bot_reply = call_grok(current_history)
 
-  # Fallback falls gar nichts klappt
   if not bot_reply:
     bot_reply = (
         "Entschuldigung, im Moment sind alle Leitungen belegt. Bitte versuche"
@@ -264,6 +258,7 @@ def index():
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
+
 
 
 
