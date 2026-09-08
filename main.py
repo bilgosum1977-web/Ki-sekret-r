@@ -237,4 +237,4 @@ def ping_server():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(0.0.0.0, port=port)
+    app.run(host="0.0.0.0", port=port)  # Korrigiert: "0.0.0.0" als String
