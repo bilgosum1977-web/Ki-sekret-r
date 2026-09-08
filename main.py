@@ -13,18 +13,37 @@ XAI_GROK_API_KEY = os.getenv("GROK_API_KEY")
 APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
 
+# Deine feste Admin Telegram Chat-ID
+ADMIN_CHAT_ID = "8874543115"
+
 # Business Model Konfiguration
 INITIAL_BALANCE = 2.50
 COST_PER_PREMIUM_TASK = 0.50
 
-# In-Memory Speicher für User-Guthaben und Chat-Verläufe
+# In-Memory Speicher für User-Guthaben, Chat-Verläufe und das zuletzt genutzte Modell
 user_balances = {}
 chat_histories = {}
+last_used_model = {}
 MAX_HISTORY_LENGTH = 10
 
+# Strenger System-Prompt für den Bot nach außen
+SYSTEM_PROMPT = {
+    "role": "system",
+    "content": (
+        "Du bist ausnahmslos der persönliche 'KI-Sekretär' und Chief of Staff"
+        " des Nutzers auf Telegram. Du darfst unter keinen Umständen erwähnen,"
+        " dass du von OpenAI, Groq, Google, xAI oder einem anderen Anbieter"
+        " stammst. Die Grundversion ist komplett kostenlos. Premium-Aktionen"
+        " kosten 0,50 €. Antworte professionell und auf Deutsch."
+    ),
+}
 
-def send_telegram_message(chat_id, text):
-  """Sendet eine Nachricht an den Telegram Chat"""
+
+def send_telegram_message(chat_id, text, model_name=None):
+  # Wenn du (der Admin) schreibst, setzen wir die sichtbare Modell-Info direkt davor
+  if str(chat_id) == ADMIN_CHAT_ID and model_name:
+    text = f"🤖 *[Genutzte KI: {model_name}]*\n\n{text}"
+
   url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
   payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
   try:
@@ -33,31 +52,49 @@ def send_telegram_message(chat_id, text):
     print(f"Telegram Sende-Fehler: {e}")
 
 
-def call_groq_llama(history):
-  """Haupt-Worker: Groq (openai/gpt-oss-20b)"""
+def get_full_history_with_system(history):
+  return [SYSTEM_PROMPT] + history
+
+
+def call_groq_llama(history, chat_id):
   if not GROQ_API_KEY:
-    return None
+    return None, None
   url = "https://api.groq.com/openai/v1/chat/completions"
   headers = {
       "Authorization": f"Bearer {GROQ_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {"model": "openai/gpt-oss-20b", "messages": history}
+  payload = {
+      "model": "openai/gpt-oss-20b",
+      "messages": get_full_history_with_system(history),
+  }
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
-      return response.json()["choices"][0]["message"]["content"]
+      model_label = "Groq (Llama / Kostenlos)"
+      last_used_model[chat_id] = model_label
+      return (
+          response.json()["choices"][0]["message"]["content"],
+          model_label,
+      )
   except Exception as e:
     print(f"Groq Fehler: {e}")
-  return None
+  return None, None
 
 
-def call_gemini(history):
-  """Google Gemini (Backup 1)"""
+def call_gemini(history, chat_id):
   if not GEMINI_API_KEY:
-    return None
+    return None, None
   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-  contents = []
+  contents = [{
+      "role": "user",
+      "parts": [{
+          "text": (
+              "Systemanweisung: Du bist ausschließlich der persönliche"
+              " KI-Sekretär. Erwähne niemals Anbieter.\n\n"
+          )
+      }],
+  }]
   for msg in history:
     role = "user" if msg["role"] == "user" else "model"
     contents.append({"role": role, "parts": [{"text": msg["content"]}]})
@@ -65,53 +102,71 @@ def call_gemini(history):
   try:
     response = requests.post(url, json=payload, timeout=10)
     if response.status_code == 200:
+      model_label = "Google Gemini (Backup)"
+      last_used_model[chat_id] = model_label
       res_data = response.json()
-      return res_data["candidates"][0]["content"]["parts"][0]["text"]
+      return (
+          res_data["candidates"][0]["content"]["parts"][0]["text"],
+          model_label,
+      )
   except Exception as e:
     print(f"Gemini Fehler: {e}")
-  return None
+  return None, None
 
 
-def call_grok(history):
-  """xAI Grok 4 (Spezialist / Backup 2)"""
+def call_grok(history, chat_id):
   if not XAI_GROK_API_KEY:
-    return None
+    return None, None
   url = "https://api.x.ai/v1/chat/completions"
   headers = {
       "Authorization": f"Bearer {XAI_GROK_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {"model": "grok-4", "messages": history}
+  payload = {
+      "model": "grok-4",
+      "messages": get_full_history_with_system(history),
+  }
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
-      return response.json()["choices"][0]["message"]["content"]
+      model_label = "xAI Grok 4 (Kreativ)"
+      last_used_model[chat_id] = model_label
+      return (
+          response.json()["choices"][0]["message"]["content"],
+          model_label,
+      )
   except Exception as e:
     print(f"Grok Fehler: {e}")
-  return None
+  return None, None
 
 
-def call_openai_gpt(history):
-  """OpenAI GPT (Spezialist für Code & Logik)"""
+def call_openai_gpt(history, chat_id):
   if not OPENAI_API_KEY:
-    return None
+    return None, None
   url = "https://api.openai.com/v1/chat/completions"
   headers = {
       "Authorization": f"Bearer {OPENAI_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {"model": "gpt-4o-mini", "messages": history}
+  payload = {
+      "model": "gpt-4o-mini",
+      "messages": get_full_history_with_system(history),
+  }
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
-      return response.json()["choices"][0]["message"]["content"]
+      model_label = "OpenAI GPT-4o-mini (Code/Logik)"
+      last_used_model[chat_id] = model_label
+      return (
+          response.json()["choices"][0]["message"]["content"],
+          model_label,
+      )
   except Exception as e:
     print(f"OpenAI Fehler: {e}")
-  return None
+  return None, None
 
 
 def run_apify_scraper(prompt):
-  """Apify Web-Scraping Integration"""
   if not APIFY_API_KEY:
     return "Apify API Key fehlt im System."
   url = f"https://api.apify.com/v2/acts/apify~google-search-scraper/run-sync-get-dataset-items?token={APIFY_API_KEY}"
@@ -135,11 +190,9 @@ def run_apify_scraper(prompt):
     return f"Scraper-Fehlgeschlagen: {str(e)}"
 
 
-def smart_route_message(history, user_text):
-  """Intelligenter Router: Wählt das beste Modell basierend auf dem Inhalt"""
+def smart_route_message(history, user_text, chat_id):
   text_lower = user_text.lower()
-
-  # 1. Programmier- oder Logikfragen -> Gehen bevorzugt an OpenAI GPT
+  # Nur bei echten Code-/Programmierfragen schaltet sich OpenAI ein
   if any(
       kw in text_lower
       for kw in [
@@ -152,24 +205,22 @@ def smart_route_message(history, user_text):
           "funktion",
       ]
   ):
-    response = call_openai_gpt(history)
-    if response:
-      return response
+    resp, m_name = call_openai_gpt(history, chat_id)
+    if resp:
+      return resp, m_name
 
-  # 2. Kreative Anfragen / Stories -> Gehen bevorzugt an Grok 4
   if any(kw in text_lower for kw in ["kreativ", "story", "gedicht", "grok"]):
-    response = call_grok(history)
-    if response:
-      return response
+    resp, m_name = call_grok(history, chat_id)
+    if resp:
+      return resp, m_name
 
-  # 3. Standard-Anfragen -> Haupt-Worker Groq, mit Fallback auf Gemini und Grok
-  response = call_groq_llama(history)
-  if not response:
-    response = call_gemini(history)
-  if not response:
-    response = call_grok(history)
-
-  return response
+  # Standardmäßig greift immer Groq (Llama) als dein kostenloser Standard-Worker!
+  resp, m_name = call_groq_llama(history, chat_id)
+  if not resp:
+    resp, m_name = call_gemini(history, chat_id)
+  if not resp:
+    resp, m_name = call_grok(history, chat_id)
+  return resp, m_name
 
 
 @app.route("/", methods=["POST"])
@@ -179,7 +230,7 @@ def webhook():
     return "OK", 200
 
   message = data["message"]
-  chat_id = message["chat"]["id"]
+  chat_id = str(message["chat"]["id"])
   user_text = message.get("text", "")
 
   if not user_text:
@@ -188,11 +239,30 @@ def webhook():
   if chat_id not in user_balances:
     user_balances[chat_id] = INITIAL_BALANCE
 
+  if user_text.lower() == "/id":
+    send_telegram_message(chat_id, f"🔑 **Deine Telegram Chat-ID:** `{chat_id}`")
+    return "OK", 200
+
+  if user_text.lower() in ["/status", "/admin"]:
+    if chat_id == ADMIN_CHAT_ID:
+      current_model = last_used_model.get(chat_id, "Noch kein Modell genutzt")
+      balance = user_balances[chat_id]
+      send_telegram_message(
+          chat_id,
+          f"🛠️ **ADMIN STATUS**\n- Letzte KI: `{current_model}`\n- Kontostand:"
+          f" `{balance:.2f} €`",
+      )
+    else:
+      send_telegram_message(
+          chat_id, "Entschuldigung, diesen Befehl kenne ich nicht."
+      )
+    return "OK", 200
+
   if user_text.lower() in ["/guthaben", "guthaben", "balance"]:
     send_telegram_message(
         chat_id,
-        f"💳 **Dein Kontostand:** {user_balances[chat_id]:.2f} €\n(Kosten"
-        f" pro Premium-Aufgabe: {COST_PER_PREMIUM_TASK:.2f} €)",
+        f"💳 **Dein Kontostand:** {user_balances[chat_id]:.2f} €\n(Grundversion:"
+        f" **Kostenlos** | Premium-Aufgabe: {COST_PER_PREMIUM_TASK:.2f} €)",
     )
     return "OK", 200
 
@@ -206,9 +276,9 @@ def webhook():
 
   current_history = chat_histories[chat_id]
   bot_reply = None
+  used_model_name = "Unbekannt"
   text_lower = user_text.lower()
 
-  # Premium-Aufgaben (Scraping & Automatisierung)
   is_premium_request = (
       "scrape" in text_lower
       or "web durchsuchen" in text_lower
@@ -231,19 +301,16 @@ def webhook():
     if "scrape" in text_lower or "web durchsuchen" in text_lower:
       send_telegram_message(
           chat_id,
-          f"💡 **Premium-Service:** -{COST_PER_PREMIUM_TASK:.2f} € abgezogen."
-          f" Restguthaben: **{user_balances[chat_id]:.2f} €**. Starte"
-          " Web-Abfrage...",
+          f"💡 **Premium-Service (0,50 €):** Starte Web-Abfrage...",
       )
       bot_reply = run_apify_scraper(user_text)
+      used_model_name = "Apify Scraper"
     else:
       send_telegram_message(
           chat_id,
-          f"⚙️ **Automatisierung:** -{COST_PER_PREMIUM_TASK:.2f} € abgezogen."
-          f" Restguthaben: **{user_balances[chat_id]:.2f} €**. Starte"
-          " Workflow...",
+          f"⚙️ **Automatisierung (0,50 €):** Starte Workflow...",
       )
-      bot_reply = call_openai_gpt(current_history)
+      bot_reply, used_model_name = call_openai_gpt(current_history, chat_id)
       if MAKE_WEBHOOK_URL:
         try:
           requests.post(
@@ -253,10 +320,10 @@ def webhook():
           )
         except Exception as e:
           print(f"Make Webhook Fehler: {e}")
-
   else:
-    # Intelligentes Routing für alle normalen Nachrichten
-    bot_reply = smart_route_message(current_history, user_text)
+    bot_reply, used_model_name = smart_route_message(
+        current_history, user_text, chat_id
+    )
 
   if not bot_reply:
     bot_reply = (
@@ -265,19 +332,20 @@ def webhook():
     )
 
   chat_histories[chat_id].append({"role": "assistant", "content": bot_reply})
-  send_telegram_message(chat_id, bot_reply)
+  send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
 
   return "OK", 200
 
 
 @app.route("/", methods=["GET"])
 def index():
-  return "Bot with Smart Routing is running live!", 200
+  return "Ki Sekretär Bot is running live!", 200
 
 
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
+
 
 
 
