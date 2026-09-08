@@ -33,17 +33,8 @@ SYSTEM_PROMPT = (
     "Du agierst als Teil eines engen KI-Teams. Antworte präzise, professionell und auf den Punkt."
 )
 
-def send_chat_action(chat_id, action="typing"):
-    """Zeigt in Telegram an, dass der Bot tippt oder ein Bild hochlädt."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
-    payload = {"chat_id": chat_id, "action": action}
-    try:
-        requests.post(url, json=payload, timeout=3)
-    except Exception as e:
-        print(f"Fehler beim Senden der Chat-Aktion: {e}", flush=True)
-
 def send_telegram_message(chat_id, text, model_name=""):
-    """Sendet die formatierte Antwort an den Telegram-Chat."""
+    """Sendet die formatierte Antwort an den Telegram-Chat und gibt die message_id zurück."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -51,9 +42,25 @@ def send_telegram_message(chat_id, text, model_name=""):
     }
     try:
         response = requests.post(url, json=payload, timeout=5)
-        print(f"Telegram Sende-Antwort Status: {response.status_code}", flush=True)
+        res_json = response.json()
+        if res_json.get("ok"):
+            return res_json["result"]["message_id"]
     except Exception as e:
         print(f"Fehler beim Telegram-Senden: {e}", flush=True)
+    return None
+
+def edit_telegram_message(chat_id, message_id, text, model_name=""):
+    """Aktualisiert eine bestehende Nachricht (z.B. wenn das Ergebnis da ist)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": f"{text}\n\n[Team: {model_name}]" if model_name else text
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Fehler beim Bearbeiten der Telegram-Nachricht: {e}", flush=True)
 
 def send_telegram_photo(chat_id, photo_bytes, caption=""):
     """Sendet ein generiertes Bild direkt an den Telegram-Chat."""
@@ -179,12 +186,50 @@ def smart_route_message(history, user_text, image_bytes=None):
     print("Fallback greift -> Gemini übernimmt.", flush=True)
     return call_gemini(history, image_bytes=None)
 
+def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
+    """Verarbeitet die Nachricht im Hintergrund und aktualisiert die Lade-Nachricht."""
+    try:
+        if chat_id not in user_balances:
+            user_balances[chat_id] = INITIAL_BALANCE
+            
+        if chat_id not in chat_histories:
+            chat_histories[chat_id] = []
+            
+        content_desc = user_text if user_text else "[Bild gesendet]"
+        chat_histories[chat_id].append({"role": "user", "content": content_desc})
+        
+        if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
+            chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
+            
+        current_history = chat_histories[chat_id]
+        
+        print(f"Starte Smart Routing im Hintergrund... Text: '{user_text}'", flush=True)
+        routing_result = smart_route_message(current_history, user_text, image_bytes=image_bytes)
+        
+        # Fall A: Bild wurde generiert
+        if len(routing_result) == 3 and routing_result[0] == "__IMAGE_GENERATED__":
+            _, generated_img_bytes, used_model_name = routing_result
+            # Lade-Nachricht löschen oder durch Text ersetzen falls gewünscht, hier senden wir das Foto
+            caption = f"Dein generiertes Bild\n\n[Team: {used_model_name}]"
+            send_telegram_photo(chat_id, generated_img_bytes, caption=caption)
+            chat_histories[chat_id].append({"role": "assistant", "content": "[Bild generiert und gesendet]"})
+            
+        # Fall B: Normale Text- / Medien-Antwort
+        else:
+            bot_reply, used_model_name = routing_result
+            if not bot_reply:
+                bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
+            chat_histories[chat_id].append({"role": "assistant", "content": bot_reply})
+            # Statt neuer Nachricht aktualisieren wir die bestehende Lade-Nachricht!
+            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
+            
+    except Exception as e:
+        print(f"FEHLER IN BACKGROUND WORKER: {e}", flush=True)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json()
-        print(f"Eingehendes JSON von Telegram: {data}", flush=True)
-        
         if not data or "message" not in data:
             return "OK", 200
             
@@ -204,43 +249,14 @@ def webhook():
         if not user_text and not image_bytes:
             return "OK", 200
             
-        # Sofort "schreibt..." oder "sendet Foto..." anzeigen, damit der Nutzer Feedback hat
-        if image_bytes or any(cmd in user_text.lower() for cmd in ["erstelle ein bild", "generiere ein bild", "male ein bild", "zeichne"]):
-            send_chat_action(chat_id, action="upload_photo")
-        else:
-            send_chat_action(chat_id, action="typing")
-            
-        if chat_id not in user_balances:
-            user_balances[chat_id] = INITIAL_BALANCE
-            
-        if chat_id not in chat_histories:
-            chat_histories[chat_id] = []
-            
-        content_desc = user_text if user_text else "[Bild gesendet]"
-        chat_histories[chat_id].append({"role": "user", "content": content_desc})
+        # Sofort eine sichtbare Status-Nachricht senden ("Analysiere..." / "Verarbeite..."), 
+        # damit Telegram sofort eine Antwort bekommt und kein zweites Mal triggert!
+        loading_text = "Analysiere das Bild..." if image_bytes else "Verarbeite Anfrage..."
+        loading_msg_id = send_telegram_message(chat_id, loading_text)
         
-        if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
-            chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
-            
-        current_history = chat_histories[chat_id]
-        
-        print(f"Starte Smart Routing... Text: '{user_text}'", flush=True)
-        routing_result = smart_route_message(current_history, user_text, image_bytes=image_bytes)
-        
-        # Fall A: Bild wurde generiert
-        if len(routing_result) == 3 and routing_result[0] == "__IMAGE_GENERATED__":
-            _, generated_img_bytes, used_model_name = routing_result
-            caption = f"Dein generiertes Bild\n\n[Team: {used_model_name}]"
-            send_telegram_photo(chat_id, generated_img_bytes, caption=caption)
-            chat_histories[chat_id].append({"role": "assistant", "content": "[Bild generiert und gesendet]"})
-            
-        # Fall B: Normale Text- / Medien-Antwort
-        else:
-            bot_reply, used_model_name = routing_result
-            if not bot_reply:
-                bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
-            chat_histories[chat_id].append({"role": "assistant", "content": bot_reply})
-            send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
+        # Starte die echte KI-Verarbeitung im Hintergrund
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        executor.submit(process_message_async, chat_id, user_text, image_bytes, loading_msg_id)
         
     except Exception as e:
         print(f"KRITISCHER FEHLER IM WEBHOOK: {e}", flush=True)
