@@ -139,7 +139,7 @@ def smart_route_message(history, user_text, image_bytes=None):
         
     return "Entschuldigung, im Moment sind alle Leitungen überlastet.", "System-Fallback"
 
-@app.route("/", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
     if not data or "message" not in data:
