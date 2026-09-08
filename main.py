@@ -86,17 +86,17 @@ def call_gemini(history, image_bytes=None):
             system_instruction=SYSTEM_PROMPT
         )
         
-        # Wenn ein Bild da ist, nutzen wir direkte Generierung mit Bild-Support
+        # Wenn ein Bild vorhanden ist, nutzen wir Part.from_bytes für den fehlerfreien Upload
         if image_bytes:
-            image_part = {
-                "mime_type": "image/jpeg",
-                "data": image_bytes
-            }
             prompt_text = history[-1]["content"] if history else "Was ist auf diesem Bild zu sehen?"
+            image_part = genai.types.Part.from_bytes(
+                data=image_bytes,
+                mime_type='image/jpeg'
+            )
             response = model.generate_content([prompt_text, image_part])
             return response.text, f"Gemini ({GEMINI_MODEL})"
         
-        # Für reinen Text mit Historie über Chat
+        # Für reinen Text mit Chat-Historie
         gemini_history = []
         for msg in history[:-1]:
             role = "user" if msg["role"] == "user" else "model"
@@ -108,7 +108,7 @@ def call_gemini(history, image_bytes=None):
             
         return response.text, f"Gemini ({GEMINI_MODEL})"
     except Exception as e:
-        print(f"Gemini Fehler: {e}", flush=True)
+        print(f"Gemini Detail-Fehler: {e}", flush=True)
         return None, None
 
 def smart_route_message(history, user_text, image_bytes=None):
