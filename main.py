@@ -18,7 +18,7 @@ if GROQ_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Modell-Namen (Aktualisiert auf Gemini 3.7 Flash)
+# Modell-Namen
 GROQ_MODEL = "openai/gpt-oss-20b"
 GEMINI_MODEL = "gemini-3.7-flash"
 
@@ -79,7 +79,7 @@ def call_groq_openai(history):
         return None, None
 
 def call_gemini(history, image_bytes=None):
-    """Ruft Gemini 3.7 Flash für Bildanalysen und Text auf."""
+    """Ruft Gemini für Bildanalysen und Text auf."""
     try:
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
@@ -88,11 +88,12 @@ def call_gemini(history, image_bytes=None):
         
         if image_bytes:
             prompt_text = history[-1]["content"] if history else "Was ist auf diesem Bild zu sehen?"
-            image_part = genai.types.Part.from_bytes(
-                data=image_bytes,
-                mime_type='image/jpeg'
-            )
-            response = model.generate_content([prompt_text, image_part])
+            # Direkte Übergabe im von der API unterstützten Format
+            image_content = {
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            }
+            response = model.generate_content([prompt_text, image_content])
             return response.text, f"Gemini ({GEMINI_MODEL})"
         
         gemini_history = []
@@ -111,9 +112,9 @@ def call_gemini(history, image_bytes=None):
         return f"Gemini API Fehler: {error_msg}", "Gemini (Fehler)"
 
 def smart_route_message(history, user_text, image_bytes=None):
-    """Smarter Team-Router: Bilder gehen direkt zu Gemini 3.7 Flash."""
+    """Smarter Team-Router: Bilder gehen direkt zu Gemini."""
     if image_bytes is not None:
-        print("Bild erkannt -> Leite direkt an Gemini 3.7 Flash weiter.", flush=True)
+        print("Bild erkannt -> Leite direkt an Gemini weiter.", flush=True)
         return call_gemini(history, image_bytes=image_bytes)
 
     def try_groq():
