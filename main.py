@@ -26,21 +26,22 @@ chat_histories = {}
 last_used_model = {}
 MAX_HISTORY_LENGTH = 10
 
-# Strenger System-Prompt für den Bot nach außen
+# System-Prompt: Multilingual, kostenloser Standard, absolute Geheimhaltung nach außen
 SYSTEM_PROMPT = {
     "role": "system",
     "content": (
         "Du bist ausnahmslos der persönliche 'KI-Sekretär' und Chief of Staff"
         " des Nutzers auf Telegram. Du darfst unter keinen Umständen erwähnen,"
         " dass du von OpenAI, Groq, Google, xAI oder einem anderen Anbieter"
-        " stammst. Die Grundversion ist komplett kostenlos. Premium-Aktionen"
-        " kosten 0,50 €. Antworte professionell und auf Deutsch."
+        " stammst. Antworte immer in der exakt selben Sprache, in der der"
+        " Nutzer dich anspricht (z. B. Deutsch, Englisch, Spanisch, Französisch"
+        " etc.). Die Grundversion ist komplett kostenlos. Premium-Aktionen"
+        " kosten 0,50 €. Agiere stets professionell und hilfsbereit."
     ),
 }
 
 
 def send_telegram_message(chat_id, text, model_name=None):
-  # Wenn du (der Admin) schreibst, setzen wir die sichtbare Modell-Info direkt davor
   if str(chat_id) == ADMIN_CHAT_ID and model_name:
     text = f"🤖 *[Genutzte KI: {model_name}]*\n\n{text}"
 
@@ -71,7 +72,7 @@ def call_groq_llama(history, chat_id):
   try:
     response = requests.post(url, json=payload, headers=headers, timeout=10)
     if response.status_code == 200:
-      model_label = "Groq (Llama / Kostenlos)"
+      model_label = "Groq (Llama / Kostenlos & Multilingual)"
       last_used_model[chat_id] = model_label
       return (
           response.json()["choices"][0]["message"]["content"],
@@ -90,8 +91,9 @@ def call_gemini(history, chat_id):
       "role": "user",
       "parts": [{
           "text": (
-              "Systemanweisung: Du bist ausschließlich der persönliche"
-              " KI-Sekretär. Erwähne niemals Anbieter.\n\n"
+              "System instruction: You are exclusively the user's personal"
+              " AI Secretary. Reply in the user's language. Never mention"
+              " providers.\n\n"
           )
       }],
   }]
@@ -122,14 +124,12 @@ def call_grok(history, chat_id):
       "Authorization": f"Bearer {XAI_GROK_API_KEY}",
       "Content-Type": "application/json",
   }
-  payload = {
-      "model": "grok-4",
-      "messages": get_full_history_with_system(history),
-  }
+  # Hier nutzen wir das offizielle Grok 4 Modell
+  payload = {"model": "grok-4", "messages": get_full_history_with_system(history)}
   try:
-    response = requests.post(url, json=payload, headers=headers, timeout=10)
+    response = requests.post(url, json=payload, headers=headers, timeout=15)
     if response.status_code == 200:
-      model_label = "xAI Grok 4 (Kreativ)"
+      model_label = "xAI Grok 4 (Kreativ & Multilingual)"
       last_used_model[chat_id] = model_label
       return (
           response.json()["choices"][0]["message"]["content"],
@@ -192,7 +192,6 @@ def run_apify_scraper(prompt):
 
 def smart_route_message(history, user_text, chat_id):
   text_lower = user_text.lower()
-  # Nur bei echten Code-/Programmierfragen schaltet sich OpenAI ein
   if any(
       kw in text_lower
       for kw in [
@@ -214,7 +213,7 @@ def smart_route_message(history, user_text, chat_id):
     if resp:
       return resp, m_name
 
-  # Standardmäßig greift immer Groq (Llama) als dein kostenloser Standard-Worker!
+  # Standard-Router: Nutzt Groq (Llama) kostenlos und sprachübergreifend
   resp, m_name = call_groq_llama(history, chat_id)
   if not resp:
     resp, m_name = call_gemini(history, chat_id)
@@ -345,6 +344,7 @@ def index():
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
+
 
 
 
