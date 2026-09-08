@@ -27,9 +27,10 @@ MAX_HISTORY_LENGTH = 15
 
 SYSTEM_PROMPT = (
     "Du bist 'Ki Sekretär', ein hochkompetenter, proaktiver und ehrlicher KI-Assistent. "
-    "Du hast Zugriff auf kostenlose Live-Daten aus dem Internet (DuckDuckGo) und Bildanalyse. "
+    "WICHTIG: Nutze KEINE internen Browser-Tools, Websuchen oder externe Funktionen. "
+    "Wenn du Live-Daten benötigst, werden dir diese bereits vom System im Chat bereitgestellt. "
     "REGEL ZU KOSTEN: Alles, was mit reinem Wissen, Live-Suche oder Bildanalyse zu tun hat, ist für den Nutzer völlig kostenlos. "
-    "Wenn der Nutzer verlangt, dass du aktiv wirst (z. B. externe Geschäfte anschreibst, Web-Scraping über externe Tools machst oder Verhandlungen führst), "
+    "Wenn der Nutzer verlangt, dass du aktiv wirst (z. B. externe Geschäfte anschreibst, Web-Scraping machst oder Verhandlungen führst), "
     "prüfe, ob das kostenpflichtige Dienste erfordert. Wenn ja, antworte direkt: "
     "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?' "
     "Ergreife ansonsten proaktiv die Initiative und frage, ob du bei der Umsetzung helfen sollst."
@@ -97,7 +98,7 @@ def call_groq_text(history, search_context=None):
         if search_context:
             messages.append({
                 "role": "system", 
-                "content": f"Hier sind aktuelle Live-Suchergebnisse aus dem Internet (kostenlos):\n{search_context}\nNutze diese Informationen, um die Frage des Nutzers präzise zu beantworten."
+                "content": f"Hier sind aktuelle Live-Suchergebnisse aus dem Internet von unserer Websuche:\n{search_context}\nNutze diese Informationen, um die Frage des Nutzers präzise zu beantworten."
             })
             
         messages.extend(history)
@@ -106,8 +107,7 @@ def call_groq_text(history, search_context=None):
             model=GROQ_TEXT_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=1024,
-            tool_choice="none"
+            max_tokens=1024
         )
         reply = response.choices[0].message.content
         reply = clean_think_tags(reply)
@@ -134,13 +134,12 @@ def call_groq_vision(user_text, image_bytes):
                 ]
             }],
             temperature=0.5,
-            max_tokens=1024,
-            tool_choice="none"
+            max_tokens=1024
         )
         reply = response.choices[0].message.content
         reply = clean_think_tags(reply)
         
-        return reply, "Groq OSS-20B (Vision - Kostenlos)"
+        return reply, "Groq Vision - Kostenlos"
     except Exception as e:
         print(f"Groq Vision Fehler: {e}", flush=True)
         return f"Groq Vision API Fehler: {e}", "Groq (Fehler)"
@@ -160,7 +159,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
             
         search_context = None
-        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs"]
+        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs", "hotel", "antalya", "rezensionen"]
         
         if image_bytes is not None:
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
