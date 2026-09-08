@@ -37,7 +37,7 @@ def send_telegram_message(chat_id, text, model_name=""):
     payload = {
         "chat_id": chat_id,
         "text": f"{text}\n\n🤖 [Team: {model_name}]" if model_name else text,
-        "parse_mode": "Markdown"
+        
     }
     try:
         requests.post(url, json=payload, timeout=5)
