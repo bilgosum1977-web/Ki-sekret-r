@@ -6,7 +6,6 @@ from flask import Flask, request
 from groq import Groq
 import requests
 from PIL import Image
-from rembg import remove
 from duckduckgo_search import DDGS
 
 app = Flask(__name__)
@@ -28,8 +27,8 @@ MAX_HISTORY_LENGTH = 15
 
 SYSTEM_PROMPT = (
     "Du bist 'Ki Sekretär', ein hochkompetenter, proaktiver und ehrlicher KI-Assistent. "
-    "Du hast Zugriff auf kostenlose Live-Daten aus dem Internet (DuckDuckGo) und lokale Bildbearbeitung. "
-    "REGEL ZU KOSTEN: Alles, was mit reinem Wissen, Live-Suche oder lokaler Bildbearbeitung zu tun hat, ist für den Nutzer völlig kostenlos. "
+    "Du hast Zugriff auf kostenlose Live-Daten aus dem Internet (DuckDuckGo) und Bildanalyse. "
+    "REGEL ZU KOSTEN: Alles, was mit reinem Wissen, Live-Suche oder Bildanalyse zu tun hat, ist für den Nutzer völlig kostenlos. "
     "Wenn der Nutzer verlangt, dass du aktiv wirst (z. B. externe Geschäfte anschreibst, Web-Scraping über externe Tools machst oder Verhandlungen führst), "
     "prüfe, ob das kostenpflichtige Dienste erfordert. Wenn ja, antworte direkt: "
     "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?' "
@@ -67,15 +66,6 @@ def edit_telegram_message(chat_id, message_id, text, model_name=""):
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"Fehler beim Bearbeiten der Telegram-Nachricht: {e}", flush=True)
-
-def send_telegram_photo(chat_id, photo_bytes, caption=""):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("image.png", photo_bytes, "image/png")}
-    data = {"chat_id": chat_id, "caption": caption}
-    try:
-        requests.post(url, data=data, files=files, timeout=15)
-    except Exception as e:
-        print(f"Fehler beim Telegram-Foto-Senden: {e}", flush=True)
 
 def get_telegram_file_bytes(file_id):
     try:
@@ -117,7 +107,7 @@ def call_groq_text(history, search_context=None):
             messages=messages,
             temperature=0.7,
             max_tokens=1024,
-            tool_choice="none"  # Verhindert, dass das Modell interne Tools aufruft
+            tool_choice="none"
         )
         reply = response.choices[0].message.content
         reply = clean_think_tags(reply)
@@ -155,18 +145,6 @@ def call_groq_vision(user_text, image_bytes):
         print(f"Groq Vision Fehler: {e}", flush=True)
         return f"Groq Vision API Fehler: {e}", "Groq (Fehler)"
 
-def process_image_with_rembg(image_bytes):
-    try:
-        input_image = Image.open(io.BytesIO(image_bytes))
-        output_image = remove(input_image)
-        output_io = io.BytesIO()
-        output_image.save(output_io, format="PNG")
-        output_io.seek(0)
-        return output_io.read()
-    except Exception as e:
-        print(f"RemBG Fehler: {e}", flush=True)
-        return None
-
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances:
@@ -175,16 +153,6 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             chat_histories[chat_id] = []
             
         lower_text = user_text.lower() if user_text else ""
-        
-        if image_bytes is not None and any(cmd in lower_text for cmd in ["freistellen", "hintergrund entfernen", "ohne hintergrund"]):
-            processed_bytes = process_image_with_rembg(image_bytes)
-            if processed_bytes:
-                send_telegram_photo(chat_id, processed_bytes, caption="[Team: Pillow + RemBG - Kostenlos]")
-                return
-            else:
-                edit_telegram_message(chat_id, loading_msg_id, "Fehler bei der Bildfreistellung.", model_name="RemBG")
-                return
-
         content_desc = user_text if user_text else "[Bild gesendet]"
         chat_histories[chat_id].append({"role": "user", "content": content_desc})
         
