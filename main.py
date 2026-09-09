@@ -7,7 +7,8 @@ from flask import Flask, request
 from groq import Groq
 import requests
 from PIL import Image
-from ddgs import DDGS
+from duckduckgo_search import DDGS
+
 
 app = Flask(__name__)
 
