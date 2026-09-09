@@ -228,7 +228,7 @@ def autonomous_broker_loop():
 
 threading.Thread(target=autonomous_broker_loop, daemon=True).start()
 
-# --- REPARIERTER WORKER LOOP (DATENBANK-ABGLEICH) ---
+# --- REPARIERTER WORKER LOOP (DATENBANK-ABGLEICH & FIX) ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
@@ -285,12 +285,14 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                     res = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
                     has_executed_data_tool = True
                 elif fn == "add_market_demand": 
-                    bot_reply = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
+                    res = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
+                    has_executed_data_tool = True
                 
                 combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
             
             if has_executed_data_tool:
-                messages.append({"role": "user", "content": f"Verarbeite diese Live-Daten und Datenbanktreffer für meine Anfrage. Falls ein passender Eintrag im 10km Radius existiert, führe das Match zusammen:\n{combined_tool_data}"})
+                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten und den aktuellen Datenbank-Pool. Falls ein passender Eintrag im 10km Radius existiert (z.B. Suche und Biete stimmen überein), führe das Match sofort zusammen und formuliere das Broker-Ergebnis:\n{combined_tool_data}"})
+                print(f"[ADMIN LOG] 🧠 Starte finalen Match-Durchlauf über {provider}...", flush=True)
                 premium_reply, premium_model = call_premium_ai(messages, provider=provider)
                 bot_reply = premium_reply
                 used_model = premium_model
