@@ -7,7 +7,7 @@ from flask import Flask, request
 from groq import Groq
 import requests
 from PIL import Image
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 app = Flask(__name__)
 
@@ -17,16 +17,16 @@ ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN:
-    print("[ADMIN LOG] ❌ KRITISCH: Weder TELEGRAM_TOKEN noch TELEGRAM_BOT_TOKEN gefunden!", flush=True)
+    print("[ADMIN LOG] ❌ KRITISCH: Kein Telegram Token gefunden!", flush=True)
 else:
     print(f"[ADMIN LOG] ✅ Telegram Token erfolgreich geladen.", flush=True)
 
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 else:
-    print("[ADMIN LOG] ❌ KRITISCH: Weder GROQ_API_KEY noch GROK_API_KEY gefunden!", flush=True)
+    print("[ADMIN LOG] ❌ KRITISCH: Kein Groq API Key gefunden!", flush=True)
 
-# Das OpenAI-kompatible Open-Modell auf Groq
+# Das OpenAI-kompatible Modell auf Groq
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
@@ -103,11 +103,13 @@ def search_web(query):
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=3))
             if not results:
-                return "Keine aktuellen Web-Ergebnisse gefunden."
-            return "\n".join([f"• {item.get('title', '')}: {item.get('body', '')}" for item in results])
+                return "Keine aktuellen Web-Ergebnisse gefunden.", []
+            formatted_results = "\n".join([f"• {item.get('title', '')}: {item.get('body', '')}" for item in results])
+            sources = [item.get('href', item.get('title', 'Web')) for item in results]
+            return formatted_results, sources
     except Exception as e:
         print(f"[ADMIN LOG] ⚠️ Web Search Fehler: {e}", flush=True)
-        return "Websuche derzeit nicht erreichbar."
+        return "Websuche derzeit nicht erreichbar.", []
 
 ai_tools = [
     {
@@ -118,8 +120,8 @@ ai_tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Name des Fakts (z.B. 'wohnort')."},
-                    "value": {"type": "string", "description": "Wert dazu (z.B. 'Berlin')."}
+                    "key": {"type": "string", "description": "Name des Fakts."},
+                    "value": {"type": "string", "description": "Wert dazu."}
                 },
                 "required": ["key", "value"]
             }
@@ -153,23 +155,30 @@ def clean_think_tags(text):
         return text.split("</think>")[-1].strip()
     return text
 
-def send_telegram_message(chat_id, text, model_name=""):
+def format_reply_for_user(chat_id, text, model_name="", sources=None):
+    """Fügt Admin-Details (Wer spricht, Modell, Quellen) hinzu, wenn der Admin schreibt. Normaler User sieht nichts."""
+    if str(chat_id) == ADMIN_USER_ID:
+        admin_info = f"\n\n--- [ADMIN INFO] ---\n👤 User-ID: {chat_id}\n🤖 Modell: {model_name}"
+        if sources:
+            admin_info += f"\n🌐 Quellen: {', '.join(sources)}"
+        return f"{text}{admin_info}"
+    return text
+
+def send_telegram_message(chat_id, text, model_name="", sources=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    final_text = f"{text}\n\n[Team: {model_name}]" if str(chat_id) == ADMIN_USER_ID and model_name else text
+    final_text = format_reply_for_user(chat_id, text, model_name, sources)
     try:
         response = requests.post(url, json={"chat_id": chat_id, "text": final_text}, timeout=5)
         res_json = response.json()
         if res_json.get("ok"):
             return res_json["result"]["message_id"]
-        else:
-            print(f"[ADMIN LOG] ❌ Telegram Ablehnung: {res_json}", flush=True)
     except Exception as e:
         print(f"Fehler beim Telegram-Senden: {e}")
     return None
 
-def edit_telegram_message(chat_id, message_id, text, model_name=""):
+def edit_telegram_message(chat_id, message_id, text, model_name="", sources=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    final_text = f"{text}\n\n[Team: {model_name}]" if str(chat_id) == ADMIN_USER_ID and model_name else text
+    final_text = format_reply_for_user(chat_id, text, model_name, sources)
     try:
         requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": final_text}, timeout=5)
     except Exception as e:
@@ -217,6 +226,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         history = get_history(chat_id, limit=MAX_HISTORY_LENGTH)
         messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(profile, ensure_ascii=False)}"}] + history
 
+        used_sources = []
         if image_bytes:
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
             tool_calls = None
@@ -233,7 +243,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                     bot_reply = f"Habe mir gemerkt: {args.get('key')} = {args.get('value')}"
                 
                 elif func_name == "search_web":
-                    search_result = search_web(args.get("query"))
+                    search_result, used_sources = search_web(args.get("query"))
                     messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": search_result})
                     bot_reply, used_model_name, _ = call_groq_text(messages)
@@ -242,9 +252,9 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         save_message(chat_id, "assistant", bot_reply)
 
         if loading_msg_id:
-            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
+            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name, sources=used_sources)
         else:
-            send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
+            send_telegram_message(chat_id, bot_reply, model_name=used_model_name, sources=used_sources)
     except Exception as e:
         print(f"Worker Fehler: {e}", flush=True)
 
