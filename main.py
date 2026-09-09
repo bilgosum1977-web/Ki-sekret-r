@@ -19,7 +19,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-GROQ_TEXT_MODEL = "openai/gpt-oss-20b"  # Oder dein bevorzugtes Groq-Modell
+GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
 user_balances = {}
@@ -91,7 +91,6 @@ def get_user_profile(user_id):
 # Datenbank beim Start initialisieren
 init_db()
 
-
 # --- GROQ TOOLS FÜR FAKTEN-ERKENNUNG ---
 ai_tools = [
     {
@@ -117,7 +116,6 @@ ai_tools = [
     }
 ]
 
-
 # --- SYSTEM-PROMPT ---
 SYSTEM_PROMPT = (
     "Du bist 'KI Sekretär', ein hochkompetenter, proaktiver, mitdenkender und ehrlicher KI-Assistent. "
@@ -133,7 +131,6 @@ SYSTEM_PROMPT = (
     "Präfe, ob das kostenpflichtige Dienste erfordert. Wenn ja, antworte direkt: "
     "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?'"
 )
-
 
 # --- HILFSFUNKTIONEN ---
 def clean_think_tags(text):
@@ -154,6 +151,8 @@ def send_telegram_message(chat_id, text, model_name=""):
         res_json = response.json()
         if res_json.get("ok"):
             return res_json["result"]["message_id"]
+        else:
+            print(f"[ADMIN LOG] ❌ Telegram Ablehnung: {res_json}", flush=True)
     except Exception as e:
         print(f"Fehler beim Telegram-Senden: {e}")
     return None
@@ -196,7 +195,6 @@ def search_web(query):
         print(f"[ADMIN LOG] ❌ Web Search Fehler: {e}", flush=True)
         return None
 
-
 # --- GROQ TEXT & TOOL AUFRUF ---
 def call_groq_text(messages_list, search_context=None):
     try:
@@ -217,16 +215,6 @@ def call_groq_text(messages_list, search_context=None):
         
         message = response.choices[0].message
         reply = message.content or ""
-        
-        # Tool-Calls abfangen (Fakten im Profil speichern)
-        if message.tool_calls:
-            for tool_call in message.tool_calls:
-                if tool_call.function.name == "save_user_fact":
-                    args = json.loads(tool_call.function.arguments)
-                    # Da wir die chat_id hier indirekt brauchen, holen wir sie uns oder nutzen ein globales Event
-                    # (Im Background-Worker übergeben wir die chat_id sauber)
-                    print(f"[GEDÄCHTNIS UPDATE VIA TOOL] {args.get('key')} = {args.get('value')}")
-            
         reply = clean_think_tags(reply)
         model_tag = "DuckDuckGo Live-Suche + Groq" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
         print(f"[ADMIN LOG] 🤖 Antwort generiert via [{model_tag}]", flush=True)
@@ -234,7 +222,6 @@ def call_groq_text(messages_list, search_context=None):
     except Exception as e:
         print(f"[ADMIN LOG] ❌ Groq Text Fehler: {e}", flush=True)
         return "Es ist ein technischer Fehler aufgetreten.", "Groq (Fehler)", None
-
 
 # --- GROQ VISION AUFRUF ---
 def call_groq_vision(user_text, image_bytes):
@@ -263,12 +250,11 @@ def call_groq_vision(user_text, image_bytes):
         print(f"[ADMIN LOG] ❌ Groq Vision Fehler: {e}", flush=True)
         return "Bildanalyse-Fehler", "Groq (Fehler)"
 
-
 # --- ASYNCHRONE NACHRICHTEN-VERARBEITUNG ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances:
-            user_balances[chat_id] = INITIAL_BASE_BALANCE = INITIAL_BALANCE
+            user_balances[chat_id] = INITIAL_BALANCE
 
         # 1. User-Nachricht in SQLite speichern
         content_desc = user_text if user_text else "{Bild gesendet}"
@@ -286,7 +272,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         messages = [{"role": "system", "content": dynamic_system_prompt}] + history
 
         search_context = None
-        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs", "hotel", "antalya", "istanbul", "rezensionen"]
+        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs", "hotel", "antalya", "istanbul", "rezensionen", "preis", "kosten", "tarif"]
         lower_text = user_text.lower() if user_text else ""
 
         if image_bytes is not None:
@@ -310,12 +296,14 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         # 3. Assistenten-Antwort in SQLite speichern
         save_message(chat_id, "assistant", bot_reply)
         
-        # An Telegram senden
-        edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
+        # An Telegram senden (Robust: falls Lade-Nachricht fehlte, direkt senden)
+        if loading_msg_id:
+            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
+        else:
+            send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
 
     except Exception as e:
         print(f"[ADMIN LOG] ❌ FEHLER IM BACKGROUND WORKER: {e}", flush=True)
-
 
 # --- WEBHOOK ROUTE ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
