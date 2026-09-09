@@ -12,13 +12,21 @@ from duckduckgo_search import DDGS
 app = Flask(__name__)
 
 # --- KONFIGURATION & API-SCHLÜSSEL ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
+
+if not TELEGRAM_BOT_TOKEN:
+    print("[ADMIN LOG] ❌ KRITISCH: Weder TELEGRAM_TOKEN noch TELEGRAM_BOT_TOKEN gefunden!", flush=True)
+else:
+    print(f"[ADMIN LOG] ✅ Telegram Token erfolgreich geladen.", flush=True)
 
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
+else:
+    print("[ADMIN LOG] ❌ KRITISCH: Weder GROQ_API_KEY noch GROK_API_KEY gefunden!", flush=True)
 
+# Das OpenAI-kompatible Open-Modell auf Groq
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
@@ -32,7 +40,6 @@ DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # 1. Chat-Verlauf (Episodisch)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +49,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # 2. Dauerhaftes Profil (Semantisch)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_profile (
             user_id TEXT,
@@ -88,66 +94,70 @@ def get_user_profile(user_id):
     conn.close()
     return {row[0]: row[1] for row in rows}
 
-# Datenbank beim Start initialisieren
 init_db()
 
-# --- GROQ TOOLS FÜR FAKTEN-ERKENNUNG ---
+# --- HILFSFUNKTIONEN & TOOLS ---
+def search_web(query):
+    try:
+        print(f"[ADMIN LOG] 🔍 KI startet Live-Websuche für: {query}", flush=True)
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+            if not results:
+                return "Keine aktuellen Web-Ergebnisse gefunden."
+            return "\n".join([f"• {item.get('title', '')}: {item.get('body', '')}" for item in results])
+    except Exception as e:
+        print(f"[ADMIN LOG] ⚠️ Web Search Fehler: {e}", flush=True)
+        return "Websuche derzeit nicht erreichbar."
+
 ai_tools = [
     {
         "type": "function",
         "function": {
             "name": "save_user_fact",
-            "description": "Speichert oder aktualisiert einen wichtigen Fakt oder eine Vorliebe über den User (z.B. Programmiersprache, Wohnort, Projektname).",
+            "description": "Speichert oder aktualisiert einen wichtigen Fakt oder eine Vorliebe über den User (z.B. Wohnort, Hobbys, Projekte).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": "Der Name des Fakts (z.B. 'programmiersprache', 'wohnort')."
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "Der Wert dazu (z.B. 'Python', 'Berlin')."
-                    }
+                    "key": {"type": "string", "description": "Name des Fakts (z.B. 'wohnort')."},
+                    "value": {"type": "string", "description": "Wert dazu (z.B. 'Berlin')."}
                 },
                 "required": ["key", "value"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Führt eine Live-Websuche im Internet durch, um aktuelle Nachrichten, Preise, Daten oder Fakten zu finden.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Der Suchbegriff für die Abfrage."}
+                },
+                "required": ["query"]
             }
         }
     }
 ]
 
-# --- SYSTEM-PROMPT ---
 SYSTEM_PROMPT = (
-    "Du bist 'KI Sekretär', ein hochkompetenter, proaktiver, mitdenkender und ehrlicher KI-Assistent. "
-    "KERN-REGEL ZUM KONTEXT: Du erinnerst dich exakt an den gesamten Gesprächsverlauf sowie an das, was der Nutzer "
-    "gesagt hat, als auch an deine eigenen vorherigen Antworten. "
-    "Wenn der Nutzer kurze Befehle gibt (z. B. 'Plane es', 'Mach das', 'Mehr Details', 'Zeig mir mehr'), beziehe das IMMER "
-    "intelligent und direkt auf den Inhalt der unmittelbar vorherigen Nachrichten. "
-    "PROAKTIVES HANDELN: Erkenne Muster, nimm dem Nutzer die Arbeit ab, erleichtere ihm Aufgaben, verschaffe ihm Vorteile, "
-    "antizipiere Wünsche und beuge Problemen vor. Handle wie ein echter, mitdenkender Chef-Sekretär. "
-    "WICHTIG: Nutze KEINE internen Browser-Tools, Websuchen oder externe Funktionen. Wenn du Live-Daten benötigst, werden "
-    "dir diese bereits vom System im Chat bereitgestellt. "
-    "REGEL ZU KOSTEN: Alles, was mit reinen Wissen, Live-Suche oder Bildanalyse zu tun hat, ist für den Nutzer völlig kostenlos. "
-    "Präfe, ob das kostenpflichtige Dienste erfordert. Wenn ja, antworte direkt: "
-    "'Das kann ich machen, aber das erfordert externe Dienste und kostet ca. [Betrag]. Soll ich das tun?'"
+    "Du bist 'KI Sekretär', ein hochkompetenter, proaktiver KI-Assistent. "
+    "Erinnere dich exakt an den Kontext und nutze bei Bedarf aktiv das Websuch-Tool, um aktuelle Fragen des Nutzers zu beantworten."
 )
 
-# --- HILFSFUNKTIONEN ---
 def clean_think_tags(text):
+    if not text:
+        return ""
     if "</think>" in text:
         return text.split("</think>")[-1].strip()
     return text
 
 def send_telegram_message(chat_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    if str(chat_id) == ADMIN_USER_ID and model_name:
-        final_text = f"{text}\n\n[Team: {model_name}]"
-    else:
-        final_text = text
-    
-    payload = {"chat_id": chat_id, "text": final_text}
+    final_text = f"{text}\n\n[Team: {model_name}]" if str(chat_id) == ADMIN_USER_ID and model_name else text
     try:
-        response = requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json={"chat_id": chat_id, "text": final_text}, timeout=5)
         res_json = response.json()
         if res_json.get("ok"):
             return res_json["result"]["message_id"]
@@ -159,191 +169,109 @@ def send_telegram_message(chat_id, text, model_name=""):
 
 def edit_telegram_message(chat_id, message_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    if str(chat_id) == ADMIN_USER_ID and model_name:
-        final_text = f"{text}\n\n[Team: {model_name}]"
-    else:
-        final_text = text
-        
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": final_text}
+    final_text = f"{text}\n\n[Team: {model_name}]" if str(chat_id) == ADMIN_USER_ID and model_name else text
     try:
-        requests.post(url, json=payload, timeout=5)
+        requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": final_text}, timeout=5)
     except Exception as e:
-        print(f"Fehler beim Bearbeiten der Telegram-Nachricht: {e}")
+        print(f"Fehler beim Bearbeiten: {e}")
 
 def get_telegram_file_bytes(file_id):
     try:
-        file_info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
-        r = requests.get(file_info_url, timeout=5).json()
-        if not r.get("ok"):
-            return None
-        file_path = r["result"]["file_path"]
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-        return requests.get(file_url, timeout=10).content
+        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=5).json()
+        if not r.get("ok"): return None
+        return requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{r['result']['file_path']}", timeout=10).content
     except Exception as e:
-        print(f"Fehler beim Herunterladen des Telegram-Bildes: {e}")
+        print(f"Fehler Bild-Download: {e}")
         return None
 
-def search_web(query):
+def call_groq_text(messages_list):
     try:
-        print(f"[ADMIN LOG] 🔍 Starte DuckDuckGo Websuche für: '{query}'", flush=True)
-        with DDGS() as ddgs:
-            results = [r for r in ddgs.text(query, max_results=3)]
-            snippets = [f"• {item['title']}: {item['body']} ({item['href']})" for item in results]
-            print(f"[ADMIN LOG] ✅ Websuche erfolgreich ({len(results)} Ergebnisse gefunden)", flush=True)
-            return "\n".join(snippets)
-    except Exception as e:
-        print(f"[ADMIN LOG] ❌ Web Search Fehler: {e}", flush=True)
-        return None
-
-# --- GROQ TEXT & TOOL AUFRUF ---
-def call_groq_text(messages_list, search_context=None):
-    try:
-        if search_context:
-            messages_list.append({
-                "role": "system",
-                "content": f"Aktuelle Live-Suchergebnisse aus dem Internet:\n{search_context}\nNutze diese Infos, um proaktive Antwort zu bereichern."
-            })
-
         response = groq_client.chat.completions.create(
-            model=GROQ_TEXT_MODEL,
-            messages=messages_list,
-            tools=ai_tools,
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=1024
+            model=GROQ_TEXT_MODEL, messages=messages_list, tools=ai_tools, tool_choice="auto", temperature=0.7, max_tokens=1024
         )
-        
-        message = response.choices[0].message
-        reply = message.content or ""
-        reply = clean_think_tags(reply)
-        model_tag = "DuckDuckGo Live-Suche + Groq" if search_context else f"Groq ({GROQ_TEXT_MODEL.split('/')[-1]})"
-        print(f"[ADMIN LOG] 🤖 Antwort generiert via [{model_tag}]", flush=True)
-        return reply, model_tag, message.tool_calls
+        msg = response.choices[0].message
+        return clean_think_tags(msg.content or ""), f"Groq ({GROQ_TEXT_MODEL})", msg.tool_calls
     except Exception as e:
-        print(f"[ADMIN LOG] ❌ Groq Text Fehler: {e}", flush=True)
-        return "Es ist ein technischer Fehler aufgetreten.", "Groq (Fehler)", None
+        print(f"Groq Fehler: {e}", flush=True)
+        return "Technischer Fehler aufgetreten.", "Groq (Fehler)", None
 
-# --- GROQ VISION AUFRUF ---
 def call_groq_vision(user_text, image_bytes):
     try:
-        base64_image = io.base64.b64encode(image_bytes).decode('utf-8')
-        image_url = f"data:image/jpeg;base64,{base64_image}"
-        prompt = user_text if user_text else "Was ist auf diesem Bild zu sehen?"
-
+        b64 = io.base64.b64encode(image_bytes).decode('utf-8')
         response = groq_client.chat.completions.create(
             model=GROQ_VISION_MODEL,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-            }],
-            temperature=0.5,
-            max_tokens=1024
+            messages=[{"role": "user", "content": [{"type": "text", "text": user_text or "Bild analysieren"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
+            temperature=0.5, max_tokens=1024
         )
-        reply = response.choices[0].message.content
-        reply = clean_think_tags(reply)
-        print(f"[ADMIN LOG] 👁️ Bildanalyse erfolgreich mit Qwen Vision", flush=True)
-        return reply, "Qwen Vision"
+        return clean_think_tags(response.choices[0].message.content), "Qwen Vision"
     except Exception as e:
-        print(f"[ADMIN LOG] ❌ Groq Vision Fehler: {e}", flush=True)
+        print(f"Vision Fehler: {e}", flush=True)
         return "Bildanalyse-Fehler", "Groq (Fehler)"
 
-# --- ASYNCHRONE NACHRICHTEN-VERARBEITUNG ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
-        if chat_id not in user_balances:
-            user_balances[chat_id] = INITIAL_BALANCE
-
-        # 1. User-Nachricht in SQLite speichern
-        content_desc = user_text if user_text else "{Bild gesendet}"
-        save_message(chat_id, "user", content_desc)
-
-        # 2. Kontext laden: Profil + Historie aus SQLite
+        if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
+        save_message(chat_id, "user", user_text or "{Bild gesendet}")
+        
         profile = get_user_profile(chat_id)
         history = get_history(chat_id, limit=MAX_HISTORY_LENGTH)
+        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(profile, ensure_ascii=False)}"}] + history
 
-        # System-Prompt dynamisch mit Profil anreichern
-        dynamic_system_prompt = (
-            f"{SYSTEM_PROMPT}\n\n"
-            f"Das weißt du bereits über diesen Nutzer (Langzeit-Profil): {json.dumps(profile, ensure_ascii=False)}"
-        )
-        messages = [{"role": "system", "content": dynamic_system_prompt}] + history
-
-        search_context = None
-        live_triggers = ["wetter", "heute", "morgen", "aktuell", "nachrichten", "news", "wie ist", "wer ist", "was ist", "spielstand", "kurs", "hotel", "antalya", "istanbul", "rezensionen", "preis", "kosten", "tarif"]
-        lower_text = user_text.lower() if user_text else ""
-
-        if image_bytes is not None:
+        if image_bytes:
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
+            tool_calls = None
         else:
-            if any(trigger in lower_text for trigger in live_triggers):
-                search_context = search_web(user_text)
-            
-            bot_reply, used_model_name, tool_calls = call_groq_text(messages, search_context=search_context)
-            
-            # Tools (Fakten speichern) für diesen User ausführen
-            if tool_calls:
-                for tc in tool_calls:
-                    if tc.function.name == "save_user_fact":
-                        args = json.loads(tc.function.arguments)
-                        save_user_fact(chat_id, args.get("key"), args.get("value"))
+            bot_reply, used_model_name, tool_calls = call_groq_text(messages)
 
-        if not bot_reply:
-            bot_reply = "Es ist ein unerwarteter Fehler aufgetreten."
+        if tool_calls:
+            for tc in tool_calls:
+                func_name = tc.function.name
+                args = json.loads(tc.function.arguments)
+                
+                if func_name == "save_user_fact":
+                    save_user_fact(chat_id, args.get("key"), args.get("value"))
+                    bot_reply = f"Habe mir gemerkt: {args.get('key')} = {args.get('value')}"
+                
+                elif func_name == "search_web":
+                    search_result = search_web(args.get("query"))
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": search_result})
+                    bot_reply, used_model_name, _ = call_groq_text(messages)
 
-        # 3. Assistenten-Antwort in SQLite speichern
+        bot_reply = bot_reply or "Es ist ein unerwarteter Fehler aufgetreten."
         save_message(chat_id, "assistant", bot_reply)
-        
-        # An Telegram senden (Robust: falls Lade-Nachricht fehlte, direkt senden)
+
         if loading_msg_id:
             edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name)
         else:
             send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
-
     except Exception as e:
-        print(f"[ADMIN LOG] ❌ FEHLER IM BACKGROUND WORKER: {e}", flush=True)
+        print(f"Worker Fehler: {e}", flush=True)
 
-# --- WEBHOOK ROUTE ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json()
-        if not data or "message" not in data:
-            return "OK", 200
+        if not data or "message" not in data: return "OK", 200
+        msg = data["message"]
+        chat_id = str(msg["chat"]["id"])
+        user_text = msg.get("text", msg.get("caption", ""))
+        image_bytes = get_telegram_file_bytes(msg["photo"][-1]["file_id"]) if "photo" in msg else None
+        
+        if not user_text and image_bytes: user_text = "Was ist auf diesem Bild?"
+        if not user_text and not image_bytes: return "OK", 200
 
-        message = data["message"]
-        chat_id = str(message["chat"]["id"])
-        user_text = message.get("text", message.get("caption", ""))
-        image_bytes = None
-
-        if "photo" in message:
-            photo_array = message["photo"]
-            file_id = photo_array[-1]["file_id"]
-            image_bytes = get_telegram_file_bytes(file_id)
-            if not user_text:
-                user_text = "Was ist auf diesem Bild zu sehen?"
-
-        if not user_text and not image_bytes:
-            return "OK", 200
-
-        loading_text = "Analysiere das Bild..." if image_bytes else "Verarbeite Anfrage..."
-        loading_msg_id = send_telegram_message(chat_id, loading_text)
-
+        loading_msg_id = send_telegram_message(chat_id, "Analysiere..." if image_bytes else "Verarbeite...")
         executor.submit(process_message_async, chat_id, user_text, image_bytes, loading_msg_id)
-
     except Exception as e:
-        print(f"[ADMIN LOG] ❌ KRITISCHER FEHLER IM WEBHOOK: {e}", flush=True)
-
+        print(f"Webhook Fehler: {e}", flush=True)
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
-def ping_server():
-    return "Bot is awake and running!", 200
+def ping():
+    return "Bot is alive!", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
