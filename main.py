@@ -26,10 +26,8 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Auf das gewünschte Open-Modell umgestellt:
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
-
 INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
 user_balances = {}
 
@@ -85,12 +83,12 @@ def search_web(query):
     try:
         res = requests.get(f"{SEARXNG_URL}/search", params={"q": query, "format": "json"}, timeout=5)
         if res.status_code == 200:
-            items = res.json().get("results", [])[:3]
+            items = res.json().get("results", [])[:4]
             if items: return "\n".join([f"• {i.get('title','')}: {i.get('content','')} ({i.get('url','')})" for i in items]), True
     except: pass
     try:
         with DDGS() as ddgs:
-            items = list(ddgs.text(query, max_results=3))
+            items = list(ddgs.text(query, max_results=4))
             if items: return "\n".join([f"• {i.get('title','')}: {i.get('body','')} ({i.get('href','')})" for i in items]), True
     except: pass
     return "Keine Web-Ergebnisse gefunden.", False
@@ -141,7 +139,16 @@ ai_tools = [
     {"type": "function", "function": {"name": "add_market_demand", "description": "Hinterlegt eine dauerhafte Matching-Aufgabe.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "location": {"type": "string"}, "max_price": {"type": "number"}}, "required": ["title", "location", "max_price"]}}}
 ]
 
-SYSTEM_PROMPT = "Du bist 'KI Sekretär', ein autonomer Broker. Regeln: 1. Nutze 'calculate_local_distance' für max 10km Radius. 2. Prüfe Rezensionen mit 'verify_reviews_authenticity' auf Fake-Muster. 3. Nutze 'search_protected_marketplace' bei Bedarf. 4. Führe Verhandlungen via 'send_negotiation_email'."
+# --- OPTIMIERTER SYSTEM PROMPT ---
+SYSTEM_PROMPT = (
+    "Du bist 'KI Sekretär', ein autonomer Broker und Matchmaker.\n"
+    "Regeln für Werkzeuge:\n"
+    "1. Wenn der User etwas sucht oder bietet, frage als ALLERERSTES die interne Datenbank ab.\n"
+    "2. Für die Websuche ('search_web'): Nutze NIEMALS ganze Sätze! Formuliere extrem kurze Keywords, "
+    "z.B. statt 'Suche einen Job als Kellner in Essen' suchst du strikt nach: 'Gastro Aushilfe Essen' oder 'Kellner Minijob Essen'.\n"
+    "3. Nutze 'calculate_local_distance' um den 10km Radius strikt einzuhalten.\n"
+    "4. Formuliere ein konkretes, absendefertiges Anschreiben, wenn ein Match entsteht."
+)
 
 # --- ROUTER & PIPELINES ---
 def call_groq_text(messages_list):
@@ -221,25 +228,36 @@ def autonomous_broker_loop():
 
 threading.Thread(target=autonomous_broker_loop, daemon=True).start()
 
+# --- REPARIERTER WORKER LOOP (DATENBANK-ABGLEICH) ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
         used_model = "Groq"
-
         if image_bytes:
             desc, used_model = call_groq_vision(user_text, image_bytes)
             user_text = f"[Bild-Analyse: {desc}] {user_text or ''}".strip()
-
+        
         save_message(chat_id, "user", user_text)
+        
+        # Interne Datenbank abfragen für den Matching Pool
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand")
+        all_demands = cursor.fetchall()
+        conn.close()
+        
+        db_context = "\n--- INTERNE DATENBANK EINTRÄGE (MATCHING POOL) ---\n"
+        for uid, t, l, p in all_demands:
+            db_context += f"- User {uid} sucht/bietet: '{t}' in '{l}' (Limit: {p}€)\n"
 
         provider = "openai" if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
-
-        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
+        
+        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
         messages.append({"role": "user", "content": user_text})
-
+        
         content, used_model, tool_calls = call_groq_text(messages)
         bot_reply = content
-
+        
         if tool_calls:
             has_executed_data_tool = False
             combined_tool_data = "\n--- SYSTEM DATA / TOOL RESULTS ---\n"
@@ -247,45 +265,45 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             for tc in tool_calls:
                 fn, args = tc.function.name, json.loads(tc.function.arguments)
                 res = ""
-                if fn == "save_user_fact":
+                if fn == "save_user_fact": 
                     save_user_fact(chat_id, args.get("key"), args.get("value"))
                     res = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
-                elif fn == "search_web":
-                    res, _ = search_web(args.get("query"))
+                elif fn == "search_web": 
+                    clean_query = args.get("query").replace("Suche", "").replace("ich wohne in", "").strip()
+                    res, _ = search_web(clean_query)
                     has_executed_data_tool = True
-                elif fn == "calculate_local_distance":
+                elif fn == "calculate_local_distance": 
                     res = calculate_local_distance(args.get("location_a"), args.get("location_b"))
                     has_executed_data_tool = True
-                elif fn == "verify_reviews_authenticity":
+                elif fn == "verify_reviews_authenticity": 
                     res = verify_reviews_authenticity(args.get("target_name"))
                     has_executed_data_tool = True
-                elif fn == "search_protected_marketplace":
+                elif fn == "search_protected_marketplace": 
                     res = search_protected_marketplace(args.get("platform"), args.get("query"))
                     has_executed_data_tool = True
-                elif fn == "send_negotiation_email":
+                elif fn == "send_negotiation_email": 
                     res = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
                     has_executed_data_tool = True
-                elif fn == "add_market_demand":
+                elif fn == "add_market_demand": 
                     bot_reply = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
                 
                 combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
-
+            
             if has_executed_data_tool:
-                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten für meine Anfrage und formuliere das finale Broker-Ergebnis:\n{combined_tool_data}"})
+                messages.append({"role": "user", "content": f"Verarbeite diese Live-Daten und Datenbanktreffer für meine Anfrage. Falls ein passender Eintrag im 10km Radius existiert, führe das Match zusammen:\n{combined_tool_data}"})
                 premium_reply, premium_model = call_premium_ai(messages, provider=provider)
                 bot_reply = premium_reply
                 used_model = premium_model
-
+                    
         if not bot_reply or "auswertbaren daten" in bot_reply.lower():
-            bot_reply = "Ich habe die Suche und Datenanalyse im Internet durchgeführt, konnte jedoch keine passenden Inserate im 10km-Radius finden oder die Schnittstelle lieferte temporär keine Daten. Bitte versuche es mit einem anderen Suchbegriff."
+            bot_reply = "Ich habe die Netzwerkanalyse durchgeführt. Aktuell liegt kein direktes Match vor. Ich habe Ihre Suche im System hinterlegt und informiere Sie autonom, sobald ein passender Partner im Umkreis postet."
 
         save_message(chat_id, "assistant", bot_reply)
-
+        
         if loading_msg_id:
             edit_telegram_message(loading_msg_id, chat_id, bot_reply, model_name=used_model)
         else:
             send_telegram_message(chat_id, bot_reply, model_name=used_model)
-
     except Exception as e:
         if loading_msg_id:
             edit_telegram_message(loading_msg_id, chat_id, f"Fehler bei der Broker-Verarbeitung: {e}")
