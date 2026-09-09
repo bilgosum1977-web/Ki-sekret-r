@@ -15,7 +15,7 @@ ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_KEY")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
 
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -28,7 +28,6 @@ if GROQ_API_KEY:
 else:
     print("[ADMIN LOG] ⚠️ Kein Groq API Key gefunden!", flush=True)
 
-# Aktualisiert auf das gewünschte Modell
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 
@@ -214,6 +213,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             bot_reply = content
 
             if tool_calls:
+                # 1. Dem Verlauf mitteilen, dass die KI Tools aufrufen wollte (Pflicht für API)
                 messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
                 
                 for tc in tool_calls:
@@ -238,8 +238,11 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                     elif func_name == "add_market_demand":
                         tool_result = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
 
+                    # Das Ergebnis des Tools in den Verlauf legen
                     messages.append({"role": "tool", "content": str(tool_result), "tool_call_id": tc.id})
                 
+                # 🚀 REPARATUR: Jetzt fragen wir die Premium-KI mit allen gesammelten Daten ab!
+                print(f"[ADMIN LOG] 🧠 Starte finalen Broker-Durchlauf über {provider}...", flush=True)
                 bot_reply, used_model_name = call_premium_ai(messages, provider=provider)
 
         if not bot_reply:
