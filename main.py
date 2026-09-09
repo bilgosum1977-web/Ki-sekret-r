@@ -15,7 +15,7 @@ ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_KEY")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
 
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -25,9 +25,8 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
-else:
-    print("[ADMIN LOG] ⚠️ Kein Groq API Key gefunden!", flush=True)
 
+# Auf das gewünschte Open-Modell umgestellt:
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 
@@ -47,31 +46,36 @@ def init_db():
 def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     conn.cursor().execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)', (str(user_id), role, content))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_history(user_id, limit=MAX_HISTORY_LENGTH):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?', (str(user_id), limit))
-    rows = cursor.fetchall(); conn.close()
+    rows = cursor.fetchall()
+    conn.close()
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
 def save_user_fact(user_id, key, value):
     conn = sqlite3.connect(DB_PATH)
     conn.cursor().execute('INSERT INTO user_profile (user_id, fact_key, fact_value) VALUES (?, ?, ?) ON CONFLICT(user_id, fact_key) DO UPDATE SET fact_value = excluded.fact_value', (str(user_id), key, value))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_user_profile(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT fact_key, fact_value FROM user_profile WHERE user_id = ?', (str(user_id),))
-    rows = cursor.fetchall(); conn.close()
+    rows = cursor.fetchall()
+    conn.close()
     return {r[0]: r[1] for r in rows}
 
 def add_market_demand(user_id, title, location, max_price):
     conn = sqlite3.connect(DB_PATH)
     conn.cursor().execute('INSERT INTO marketplace_demand (user_id, title, location, max_price) VALUES (?, ?, ?, ?)', (str(user_id), title, location, float(max_price)))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     return "Suchauftrag erfolgreich hinterlegt! Ich scanne den Markt nun alle 30 Minuten autonom."
 
 init_db()
@@ -109,7 +113,7 @@ def search_protected_marketplace(platform, query):
     if not APIFY_TOKEN: return "Apify Token fehlt."
     try:
         actor = "apify/kleinanzeigen-scraper" if "klein" in platform.lower() else "apify/google-maps-scraper"
-        res = requests.post(f"https://apify.com{actor}/run-sync?token={APIFY_TOKEN}", json={"searchQueries": [query], "maxItems": 3}, timeout=15)
+        res = requests.post(f"https://api.apify.com/v2/acts/{actor}/run-sync?token={APIFY_TOKEN}", json={"searchQueries": [query], "maxItems": 3}, timeout=15)
         if res.status_code == 200: return json.dumps(res.json()[:3])
     except Exception as e: return f"Scraping Fehler: {e}"
     return "Keine Daten gefunden."
@@ -120,8 +124,10 @@ def send_negotiation_email(to_email, subject, body):
         msg = MIMEText(body, 'plain', 'utf-8')
         msg['Subject'], msg['From'], msg['To'] = subject, SMTP_USER, to_email
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls(); server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, [to_email], msg.as_string()); server.quit()
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_USER, [to_email], msg.as_string())
+        server.quit()
         return f"E-Mail erfolgreich an {to_email} gesendet!"
     except Exception as e: return f"E-Mail Fehler: {e}"
 
@@ -157,120 +163,132 @@ def call_groq_vision(user_text, image_bytes):
     except Exception as e: return f"Vision Fehler: {e}", "Groq Vision (Error)"
 
 def call_premium_ai(messages_list, provider="groq"):
+    if provider == "openai" and OPENAI_API_KEY:
+        try:
+            r = requests.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}, json={"model": "gpt-4o-mini", "messages": messages_list, "temperature": 0.3}, timeout=10).json()
+            return r['choices'][0]['message']['content'], "OpenAI Premium"
+        except: pass
+    elif provider == "gemini" and GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            contents = [{"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]} for m in messages_list if m.get("content")]
+            r = requests.post(url, json={"contents": contents}, timeout=10).json()
+            return r['candidates'][0]['content']['parts'][0]['text'], "Google Gemini"
+        except: pass
+    
     content, model_info, _ = call_groq_text(messages_list)
     return content, model_info
 
-# --- TELEGRAM HELPER ---
 def send_telegram_message(chat_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    final_text = f"{text}\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}" if str(chat_id) == ADMIN_USER_ID and model_name else text
-    try:
-        res = requests.post(url, json={"chat_id": chat_id, "text": final_text}, timeout=5).json()
-        if res.get("ok"): 
-            return res["result"]["message_id"]
-    except Exception as e: 
-        print(f"Telegram Senden Fehler: {e}")
-    return None
+    final = f"{text}\n\n--- [ADMIN] ---\n🤖 {model_name}" if str(chat_id) == ADMIN_USER_ID and model_name else text
+    try: 
+        return requests.post(url, json={"chat_id": chat_id, "text": final}, timeout=5).json().get("result", {}).get("message_id")
+    except: return None
 
 def edit_telegram_message(message_id, chat_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    final_text = f"{text}\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}" if str(chat_id) == ADMIN_USER_ID and model_name else text
-    try:
-        requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": final_text}, timeout=5)
-    except Exception as e: 
-        print(f"Telegram Edit Fehler: {e}")
+    final = f"{text}\n\n--- [ADMIN] ---\n🤖 {model_name}" if str(chat_id) == ADMIN_USER_ID and model_name else text
+    try: 
+        requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": final}, timeout=5)
+    except: pass
 
 def get_telegram_file_bytes(file_id):
     try:
         r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=5).json()
-        if not r.get("ok"): return None
-        return requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{r['result']['file_path']}", timeout=10).content
-    except: 
-        return None
+        if r.get("ok"): 
+            return requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{r['result']['file_path']}", timeout=10).content
+    except: pass
+    return None
 
-# --- ASYNCHRONE WORKER PIPELINE ---
+def autonomous_broker_loop():
+    while True:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand")
+            demands = cursor.fetchall()
+            conn.close()
+            
+            for uid, title, loc, price in demands:
+                raw, success = search_web(f'"{title}" {loc}')
+                if success:
+                    decision, _ = call_premium_ai([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Match-Suche für {title} in {loc} bis {price}€. Treffer:\n{raw}"}])
+                    if any(w in decision.lower() for w in ["match", "angebot", "vermittlung", "treffer"]):
+                        send_telegram_message(uid, f"🚨 AUTONOMER TREFFER GEFUNDEN:\n\n{decision}")
+        except: pass
+        time.sleep(1800)
+
+threading.Thread(target=autonomous_broker_loop, daemon=True).start()
+
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
-        save_message(chat_id, "user", user_text or "(Bild gesendet)")
-
-        profile = get_user_profile(chat_id)
-        history = get_history(chat_id, limit=MAX_HISTORY_LENGTH)
-        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nUser-Profil: {json.dumps(profile, ensure_ascii=False)}"}] + history
-
-        bot_reply, used_model_name = "", ""
+        used_model = "Groq"
 
         if image_bytes:
-            bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
-        else:
-            messages.append({"role": "user", "content": user_text})
+            desc, used_model = call_groq_vision(user_text, image_bytes)
+            user_text = f"[Bild-Analyse: {desc}] {user_text or ''}".strip()
+
+        save_message(chat_id, "user", user_text)
+
+        provider = "openai" if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
+
+        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
+        messages.append({"role": "user", "content": user_text})
+
+        content, used_model, tool_calls = call_groq_text(messages)
+        bot_reply = content
+
+        if tool_calls:
+            has_executed_data_tool = False
+            combined_tool_data = "\n--- SYSTEM DATA / TOOL RESULTS ---\n"
             
-            provider = "groq"
-            if any(keyword in user_text.lower() for keyword in ["verhandle", "kaufen", "vertrag", "preis drücken", "match", "bestelle"]):
-                provider = "openai" if OPENAI_API_KEY else "gemini"
-            
-            # Erster Durchlauf holt eventuelle Tool-Calls ab
-            content, used_model_name, tool_calls = call_groq_text(messages)
-            bot_reply = content
-
-            if tool_calls:
-                # Dem Verlauf mitteilen, dass die KI Tools nutzen möchte (API Pflicht)
-                messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
+            for tc in tool_calls:
+                fn, args = tc.function.name, json.loads(tc.function.arguments)
+                res = ""
+                if fn == "save_user_fact":
+                    save_user_fact(chat_id, args.get("key"), args.get("value"))
+                    res = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
+                elif fn == "search_web":
+                    res, _ = search_web(args.get("query"))
+                    has_executed_data_tool = True
+                elif fn == "calculate_local_distance":
+                    res = calculate_local_distance(args.get("location_a"), args.get("location_b"))
+                    has_executed_data_tool = True
+                elif fn == "verify_reviews_authenticity":
+                    res = verify_reviews_authenticity(args.get("target_name"))
+                    has_executed_data_tool = True
+                elif fn == "search_protected_marketplace":
+                    res = search_protected_marketplace(args.get("platform"), args.get("query"))
+                    has_executed_data_tool = True
+                elif fn == "send_negotiation_email":
+                    res = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
+                    has_executed_data_tool = True
+                elif fn == "add_market_demand":
+                    bot_reply = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
                 
-                # Ein Flag, um zu prüfen, ob wir Internet/Geografie-Tools genutzt haben
-                has_executed_data_tool = False
-                
-                for tc in tool_calls:
-                    func_name = tc.function.name
-                    args = json.loads(tc.function.arguments)
-                    print(f"[ADMIN LOG] 🛠️ Tool-Aufruf: {func_name} mit {args}", flush=True)
+                combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
 
-                    tool_result = ""
-                    if func_name == "save_user_fact":
-                        save_user_fact(chat_id, args.get("key"), args.get("value"))
-                        tool_result = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
-                    elif func_name == "search_web":
-                        tool_result, _ = search_web(args.get("query"))
-                        has_executed_data_tool = True
-                    elif func_name == "calculate_local_distance":
-                        tool_result = calculate_local_distance(args.get("location_a"), args.get("location_b"))
-                        has_executed_data_tool = True
-                    elif func_name == "verify_reviews_authenticity":
-                        tool_result = verify_reviews_authenticity(args.get("target_name"))
-                        has_executed_data_tool = True
-                    elif func_name == "search_protected_marketplace":
-                        tool_result = search_protected_marketplace(args.get("platform"), args.get("query"))
-                        has_executed_data_tool = True
-                    elif func_name == "send_negotiation_email":
-                        tool_result = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
-                        has_executed_data_tool = True
-                    elif func_name == "add_market_demand":
-                        tool_result = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
-                        bot_reply = tool_result # Für reine DB-Einträge reicht die Bestätigung
+            if has_executed_data_tool:
+                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten für meine Anfrage und formuliere das finale Broker-Ergebnis:\n{combined_tool_data}"})
+                premium_reply, premium_model = call_premium_ai(messages, provider=provider)
+                bot_reply = premium_reply
+                used_model = premium_model
 
-                    # WICHTIG: Das Tool-Ergebnis in die Historie legen
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(tool_result)})
-                
-                # Nur wenn echte Daten-Tools ausgeführt wurden, rufen wir die Premium-KI für das Fazit an
-                if has_executed_data_tool:
-                    print(f"[ADMIN LOG] 🧠 Starte finalen Broker-Durchlauf über {provider}...", flush=True)
-                    premium_reply, premium_model = call_premium_ai(messages, provider=provider)
-                    bot_reply = premium_reply
-                    used_model_name = premium_model
-
-            # Sicherheits-Fallback, falls wirklich gar kein Text generiert wurde
-            if not bot_reply:
-                bot_reply = "Suche beendet, aber keine auswertbaren Daten vom Modell empfangen."
+        if not bot_reply or "auswertbaren daten" in bot_reply.lower():
+            bot_reply = "Ich habe die Suche und Datenanalyse im Internet durchgeführt, konnte jedoch keine passenden Inserate im 10km-Radius finden oder die Schnittstelle lieferte temporär keine Daten. Bitte versuche es mit einem anderen Suchbegriff."
 
         save_message(chat_id, "assistant", bot_reply)
 
         if loading_msg_id:
-            edit_telegram_message(loading_msg_id, chat_id, bot_reply, model_name=used_model_name)
+            edit_telegram_message(loading_msg_id, chat_id, bot_reply, model_name=used_model)
         else:
-            send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
+            send_telegram_message(chat_id, bot_reply, model_name=used_model)
 
     except Exception as e:
-        print(f"[ADMIN LOG] ❌ Worker Fehler: {e}", flush=True)
+        if loading_msg_id:
+            edit_telegram_message(loading_msg_id, chat_id, f"Fehler bei der Broker-Verarbeitung: {e}")
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
@@ -278,23 +296,23 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 def webhook():
     try:
         data = request.get_json()
-        if not data or "message" not in data: return "OK", 200
-        msg = data["message"]
-        chat_id = str(msg["chat"]["id"])
-        user_text = msg.get("text", msg.get("caption", ""))
-        image_bytes = get_telegram_file_bytes(msg["photo"][-1]["file_id"]) if "photo" in msg else None
+        if data and "message" in data:
+            msg = data["message"]
+            chat_id = str(msg["chat"]["id"])
+            text = msg.get("text", msg.get("caption", ""))
+            img_bytes = get_telegram_file_bytes(msg["photo"][-1]["file_id"]) if "photo" in msg else None
 
-        if not user_text and not image_bytes: return "OK", 200
-
-        loading_msg_id = send_telegram_message(chat_id, "Bearbeite Anfrage..." if not image_bytes else "Analysiere Bild...")
-        executor.submit(process_message_async, chat_id, user_text, image_bytes, loading_msg_id)
-    except Exception as e:
-        print(f"Webhook Fehler: {e}", flush=True)
+            if text or img_bytes:
+                lid = send_telegram_message(chat_id, "Analysiere Foto & starte Umkreissuche..." if img_bytes else "Analysiere Daten & recherchiere...")
+                if lid: 
+                    executor.submit(process_message_async, chat_id, text, img_bytes, lid)
+    except Exception as e: 
+        print(f"Webhook Fehler: {e}")
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
-def ping():
-    return "Bot is alive and broker-ready!", 200
+def ping(): 
+    return "Bot is alive!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
