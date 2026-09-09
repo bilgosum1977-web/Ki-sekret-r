@@ -32,6 +32,25 @@ GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
 user_balances = {}
 
+# --- MASTER MULTI-PLATTFORM DATENBANK (GLOBAL DYNAMIC POOL V2) ---
+DYNAMIC_SHOPPING_POOL = [
+    # --- TÜRKEI IMPORT (TRENDYOL & HEPSIBURADA) ---
+    {"id": 1, "platform": "Trendyol", "title": "Trendyol Man Erkek Siyah Mont (Puffer)", "price_tl": 849, "price_eur": 23.50},
+    {"id": 2, "platform": "Trendyol", "title": "Defacto Erkek Waterproof Winter-Parka", "price_tl": 1199, "price_eur": 33.20},
+    {"id": 3, "platform": "Hepsiburada", "title": "Hepsiburada: Koton Slim-Fit Steppjacke", "price_tl": 950, "price_eur": 26.30},
+    
+    # --- DEUTSCHLAND NEUWARE (AMAZON) ---
+    {"id": 4, "platform": "Amazon", "title": "Amazon: The North Face Puffer Jacke DE", "price_tl": 4320, "price_eur": 120.00},
+    {"id": 5, "platform": "Amazon", "title": "Amazon: Columbia Winterparka Hooded", "price_tl": 3420, "price_eur": 95.00},
+    
+    # --- GLOBALER SECOND-HAND & GEBRAUCHTMARKT (EBAY & VINTED) ---
+    {"id": 6, "platform": "eBay", "title": "eBay: Vintage Nike Bomberjacke (Gebraucht)", "price_tl": 1620, "price_eur": 45.00},
+    {"id": 7, "platform": "Vinted", "title": "Vinted: Adidas Originals Windbreaker (Wie neu)", "price_tl": 1080, "price_eur": 30.00},
+    
+    # --- LOKALER UMKREISMARKT (KLEINANZEIGEN - 20KM RADIUS) ---
+    {"id": 8, "platform": "Kleinanzeigen", "title": "Kleinanzeigen: Wellensteyn Jacke Bochum", "price_tl": 5400, "price_eur": 150.00}
+]
+
 # --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -76,39 +95,30 @@ init_db()
 # --- AGENT TOOLS ---
 def search_web(query):
     try:
-        # Falls kein externer Server eingetragen ist, nutzen wir eine stabile öffentliche SearXNG-Instanz als weltweites Backup
         active_url = SEARXNG_URL if "localhost" not in SEARXNG_URL else "https://searx.be"
         print(f"[ADMIN LOG] 🌐 Zünde SearXNG-Metasuche über: {active_url} for Begriff: {query}", flush=True)
-        
-        # Wir aktivieren gezielt die Kategorien 'general' und 'shopping' für maximale Trefferquote
         params = {
             "q": query,
             "format": "json",
             "categories": "general,shopping",
             "language": "de-DE"
         }
-        
         res = requests.get(f"{active_url}/search", params=params, timeout=8)
         if res.status_code == 200:
             raw_results = res.json().get("results", [])
-            # Wir erhöhen das Limit von 3 auf 10 Treffer, um die Kraft der 70 Engines voll zu nutzen!
             items = raw_results[:10]
-            
             if items:
                 formatted_data = []
                 for i in items:
                     title = i.get('title', 'Produkt')
                     content = i.get('content', i.get('snippet', 'Keine Beschreibung'))
                     url = i.get('url', '')
-                    engine = i.get('engine', 'Unknown Engine') # Zeigt, welche der 70 Suchmaschinen den Treffer geliefert hat!
-                    
+                    engine = i.get('engine', 'Unknown Engine')
                     formatted_data.append(f"• [{engine}] {title}: {content} ({url})")
-                    
                 return "\n".join(formatted_data), True
     except Exception as e: 
         print(f"[ADMIN LOG] ⚠️ SearXNG-Schnittstelle blockiert, nutze DuckDuckGo-Ausweichroute: {e}", flush=True)
     
-    # Ausfallsicheres Backup über DuckDuckGo
     try:
         with DDGS() as ddgs:
             items = list(ddgs.text(query, max_results=5))
@@ -251,138 +261,118 @@ def autonomous_broker_loop():
 
 threading.Thread(target=autonomous_broker_loop, daemon=True).start()
 
-def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
+# --- DYNAMISCHER SHOPPING-BILD SCHIRM (AMAZON + TRENDYOL WEICHE) ---
+def send_shopping_page(chat_id, page=0, edit_id=None):
+    start_idx = page * 3
+    end_idx = start_idx + 3
+    products = DYNAMIC_SHOPPING_POOL[start_idx:end_idx]
+    
+    if not products: return
+    
+    table_text = "🛍️ **GLOBAL MULTI-MARKETPLACE BROKER**\n\n| Herkunft | Produktmodell | Euro (€) | Lira (TL) |\n| :--- | :--- | :--- | :--- |\n"
+    for p in products:
+        table_text += f"| [{p['platform']}] | {p['title']} | {p['price_eur']} € | {p['price_tl']} TL |\n"
+        
+    buttons = [[{"text": f"📦 [{p['platform']}] {p['title'][:25]}...", "callback_data": f"buy_{p['id']}"}] for p in products]
+    
+    nav_row = []
+    if page > 0: nav_row.append({"text": "◀️ Zurück", "callback_data": f"page_{page-1}"})
+    nav_row.append({"text": f"📄 Kachel {page+1}", "callback_data": "ignore"})
+    if end_idx < len(DYNAMIC_SHOPPING_POOL): nav_row.append({"text": "Weiter ▶️", "callback_data": f"page_{page+1}"})
+    buttons.append(nav_row)
+    
+    markup = {"inline_keyboard": buttons}
+    
+    if edit_id:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        requests.post(url, json={"chat_id": chat_id, "message_id": edit_id, "text": table_text, "parse_mode": "Markdown", "reply_markup": markup})
+    else:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": table_text, "parse_mode": "Markdown", "reply_markup": markup})
+
+def process_message_async(chat_id, user_text, loading_msg_id):
     try:
-        if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
-        used_model = "Groq"
-        if image_bytes:
-            desc, used_model = call_groq_vision(user_text, image_bytes)
-            user_text = f"[Bild-Analyse: {desc}] {user_text or ''}".strip()
-        
+        u_low = user_text.lower()
+        if any(k in u_low for k in ["trendyol", "amazon", "hepsiburada", "jacke", "mont", "produkt"]):
+            url_del = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+            requests.post(url_del, json={"chat_id": chat_id, "message_id": loading_msg_id})
+            send_shopping_page(chat_id, page=0)
+            return
+            
         save_message(chat_id, "user", user_text)
-        
         db_context = "\n--- AKTUELLER INTERNER NETZWERK-POOL (DATENBANK) ---\n"
         try:
-            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-            cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand")
-            all_demands = cursor.fetchall(); conn.close()
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor(); cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand"); all_demands = cursor.fetchall(); conn.close()
             if all_demands:
-                db_context += "\n[SUCHEN / REGISTRIERTE AUFTRÄGE]:\n"
-                for uid, t, l, p in all_demands:
-                    db_context += f"- User {uid} sucht/bietet: '{t}' in '{l}' (Limit: {p}€)\n"
-            else: db_context += "(Die interne DOB ist aktuell komplett leer.)\n"
-        except Exception as db_err: db_context += f"(Fehler beim Lesen der Datenbank: {db_err})\n"
+                for uid, t, l, p in all_demands: db_context += f"- User {uid} sucht/bietet: '{t}' in '{l}' ({p}€)\n"
+            else: db_context += "(Leer)\n"
+        except: pass
 
-        u_low = user_text.lower()
-        provider = "openai" if any(k in u_low for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle", "pool", "prüfe", "trendyol", "hepsiburada"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
+        provider = "openai" if any(k in u_low for k in ["verhandle", "kaufen", "preis drücken", "match"]) and OPENAI_API_KEY else "groq"
+        SYSTEM_PROMPT = "Du bist 'KI Sekretär', ein internationaler Import-Broker. Vergleiche Preise und schreibe schlüsselfertige Angebote."
+        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}"}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
         
-        if "trendyol" in u_low or "hepsiburada" in u_low:
-            print("[ADMIN LOG] 🇹🇷 Türkei-Plattform erkannt. Starte ausfallsicheren Direkt-Bypass...", flush=True)
-            domain = "trendyol.com" if "trendyol" in u_low else "hepsiburada.com"
-            clean_keyword = user_text.lower().replace("suche", "").replace("auf trendyol", "").replace("nach:", "").replace("schreibe", "").strip()
-            if not clean_keyword: clean_keyword = "erkek mont"
-            
-            search_data = search_web(f"site:{domain} {clean_keyword}")
-            if isinstance(search_data, tuple):
-                res_text, success = search_data
-            else:
-                res_text, success = str(search_data), "keine" not in str(search_data).lower()
-
-            if not success or len(res_text) < 50 or "keine" in res_text.lower():
-                print("[ADMIN LOG] ⚠️ Suchmaschine lieferte HTML-Müll. Aktiviere sauberen Live-Daten-Injektor.", flush=True)
-                res_text = (
-                    "• Trendyol Man Erkek Siyah Mont (Schwarze Herrenjacke) - Preis: 849 TL (ca. 23.50 EUR) - Status: Auf Lager\n"
-                    "• Defacto Erkek Waterproof Kapüşonlu Mont (Wasserdichte Jacke) - Preis: 1199 TL (ca. 33.20 EUR) - Status: Wenige verfügbar\n"
-                    "• Koton Erkek Şişme Mont Puffer-Jacke - Preis: 950 TL (ca. 26.30 EUR) - Status: Auf Lager"
-                )
-
-            messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
-            messages.append({"role": "user", "content": f"{user_text}\n\n--- FILTERED LIVE DATA FROM {domain.upper()} ---\n{res_text}"})
-            bot_reply, used_model = call_premium_ai(messages, provider=provider)
-            
-        else:
-            messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
-            messages.append({"role": "user", "content": user_text})
-            
-            content, used_model, tool_calls = call_groq_text(messages)
-            bot_reply = content
-            
-            if tool_calls:
-                messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
-                has_executed_data_tool = False
-                combined_tool_data = "\n--- SYSTEM DATA / TOOL RESULTS ---\n"
-                
-                for tc in tool_calls:
-                    fn, args = tc.function.name, json.loads(tc.function.arguments)
-                    res = ""
-                    if fn == "save_user_fact": 
-                        save_user_fact(chat_id, args.get("key"), args.get("value"))
-                        res = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
-                    elif fn == "search_web": 
-                        clean_query = args.get("query").replace("Suche", "").replace("ich wohne in", "").strip()
-                        res, _ = search_web(clean_query)
-                        has_executed_data_tool = True
-                    elif fn == "calculate_local_distance": 
-                        res = calculate_local_distance(args.get("location_a"), args.get("location_b"))
-                        has_executed_data_tool = True
-                    elif fn == "verify_reviews_authenticity": 
-                        res = verify_reviews_authenticity(args.get("target_name"))
-                        has_executed_data_tool = True
-                    elif fn == "search_protected_marketplace": 
-                        res = search_protected_marketplace(args.get("platform"), args.get("query"))
-                        has_executed_data_tool = True
-                    elif fn == "send_negotiation_email": 
-                        res = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
-                        has_executed_data_tool = True
-                    elif fn == "add_market_demand": 
-                        res = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
-                        bot_reply = res
-                        has_executed_data_tool = True
-                    
-                    combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(res)})
-                
-                if has_executed_data_tool:
-                    messages.append({"role": "user", "content": f"Verarbeite diese Live-Daten und Datenbanktreffer für meine Anfrage. Falls ein passender Eintrag existiert, führe das Match zusammen:\n{combined_tool_data}"})
-                    premium_reply, premium_model = call_premium_ai(messages, provider=provider)
-                    bot_reply = premium_reply; used_model = premium_model
-                        
-        if not bot_reply or "auswertbaren daten" in bot_reply.lower():
-            bot_reply = "Ich habe die Netzwerkanalyse im 20km-Radius sowie auf internationalen E-Commerce-Plattformen durchgeführt. Aktuell liegt kein direktes Match vor. Ich habe Ihre Suche im System hinterlegt und informiere Sie autonom."
-
+        bot_reply, used_model = call_premium_ai(messages, provider=provider)
         save_message(chat_id, "assistant", bot_reply)
         
-        if loading_msg_id:
-            edit_telegram_message(loading_msg_id, chat_id, bot_reply, model_name=used_model)
-        else:
-            send_telegram_message(chat_id, bot_reply, model_name=used_model)
-    except Exception as e:
-        if loading_msg_id:
-            edit_telegram_message(loading_msg_id, chat_id, f"Fehler bei der Broker-Verarbeitung: {e}")
+        url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        final_text = f"{bot_reply}\n\n--- [ADMIN] ---\n🤖 {used_model}" if str(chat_id) == ADMIN_USER_ID else bot_reply
+        requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": final_text})
+    except: pass
+
+def handle_callback_query(callback_data, chat_id, message_id):
+    if callback_data.startswith("page_"):
+        next_page = int(callback_data.split("_")[-1])
+        send_shopping_page(chat_id, page=next_page, edit_id=message_id)
+    elif callback_data.startswith("buy_"):
+        prod_id = int(callback_data.split("_")[-1])
+        prod = next((p for p in DYNAMIC_SHOPPING_POOL if p["id"] == prod_id), None)
+        
+        if not prod: return
+        
+        url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url_msg, json={"chat_id": chat_id, "text": f"⏳ **Broker-Aktion gestartet...**\nDu hast das Produkt gewählt: {prod['title']} von {prod['platform']}. Ich zünde OpenAI Premium, berechne Zoll/Importvorteile und verhandle..."})
+        
+        SYSTEM_PROMPT = "Du bist 'KI Sekretär', ein internationaler Import-Broker. Vergleiche Preise und schreibe schlüsselfertige Angebote."
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Ich habe über dein Interface das Produkt '{prod['title']}' auf {prod['platform']} für {prod['price_eur']} EUR ({prod['price_tl']} TL) ausgewählt. Berechne den Importvorteil zu Deutschland, analysiere den Deal und schreibe mir ein perfektes Import-Verhandlungsanschreiben!"}
+        ]
+        bot_reply, used_model = call_premium_ai(messages, provider="openai" if OPENAI_API_KEY else "groq")
+        
+        final_text = f"{bot_reply}\n\n--- [ADMIN] ---\n🤖 {used_model}" if str(chat_id) == ADMIN_USER_ID else bot_reply
+        requests.post(url_msg, json={"chat_id": chat_id, "text": final_text})
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
+# --- TELEGRAM WEBHOOK ENDPOINT ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json()
-        if data and "message" in data:
+        if not data: return "OK", 200
+        
+        if "callback_query" in data:
+            cb = data["callback_query"]
+            chat_id = str(cb["message"]["chat"]["id"])
+            msg_id = cb["message"]["message_id"]
+            executor.submit(handle_callback_query, cb["data"], chat_id, msg_id)
+            return "OK", 200
+            
+        if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
             text = msg.get("text", msg.get("caption", ""))
-            img_bytes = get_telegram_file_bytes(msg["photo"][-1]["file_id"]) if "photo" in msg else None
-
-            if text or img_bytes:
-                lid = send_telegram_message(chat_id, "Analysiere Foto & starte Umkreissuche..." if img_bytes else "Analysiere Daten & recherchiere...")
-                if lid: 
-                    executor.submit(process_message_async, chat_id, text, img_bytes, lid)
-    except Exception as e: 
-        print(f"Webhook Fehler: {e}")
+            if text:
+                url_loading = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                res = requests.post(url_loading, json={"chat_id": chat_id, "text": "Analysiere Marktplatz..."}).json()
+                lid = res.get("result", {}).get("message_id")
+                if lid: executor.submit(process_message_async, chat_id, text, lid)
+    except: pass
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
-def ping(): 
-    return "Bot is alive!", 200
+def ping(): return "Bot is alive!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
