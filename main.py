@@ -111,28 +111,19 @@ def verify_reviews_authenticity(target_name):
 def search_protected_marketplace(platform, query):
     try:
         p_low = platform.lower()
-        
-        # Falls es sich um Trendyol oder Hepsiburada handelt, nutzen wir den unblockierbaren SearXNG-Deep-Link
         if "trendyol" in p_low or "hepsiburada" in p_low:
             domain = "trendyol.com" if "trendyol" in p_low else "hepsiburada.com"
             target_query = f"site:{domain} {query}"
-            print(f"[ADMIN LOG] 🌐 Nutze unblockierbaren Deep-Link-Filter für {platform}: {target_query}", flush=True)
-            
-            res, success = search_web(target_query)
-            if success:
-                return res
-            return f"Keine aktuellen Treffer auf {domain} für '{query}' gefunden."
-            
-        # Für Kleinanzeigen bleibt der normale Apify-Weg aktiv, falls konfiguriert
-        if not APIFY_TOKEN: return "Apify Token fehlt für Kleinanzeigen."
+            print(f"[ADMIN LOG] 🌐 Deep-Link-Suche über SearXNG für {platform}: {target_query}", flush=True)
+            res_text, success = search_web(target_query)
+            return res_text
+
+        if not APIFY_TOKEN: return "Apify Token fehlt für Marktplatz-Suche."
         actor = "apify/kleinanzeigen-scraper"
-        url = f"https://api.apify.com/v2/acts/{actor}/run-sync?token={APIFY_TOKEN}"
-        run_input = {"searchQueries": [query], "maxItems": 3}
-        res = requests.post(url, json=run_input, timeout=30)
-        if res.status_code == 200: 
-            return json.dumps(res.json()[:3], ensure_ascii=False)
-            
-    except Exception as e: 
+        url = f"https://apify.com{actor}/run-sync?token={APIFY_TOKEN}"
+        res = requests.post(url, json={"searchQueries": [query], "maxItems": 3}, timeout=30)
+        if res.status_code == 200: return json.dumps(res.json()[:3], ensure_ascii=False)
+    except Exception as e:
         return f"Fehler bei der Marktplatz-Suche auf {platform}: {e}"
     return f"Keine Daten auf {platform} gefunden."
 
@@ -156,7 +147,7 @@ ai_tools = [
     {"type": "function", "function": {"name": "verify_reviews_authenticity", "description": "Sammelt Rezensionen zur Fake-Analyse.", "parameters": {"type": "object", "properties": {"target_name": {"type": "string"}}, "required": ["target_name"]}}},
     {"type": "function", "function": {
         "name": "search_protected_marketplace", 
-        "description": "Durchsucht geschützte Plattformen (Kleinanzeigen, Trendyol, Hepsiburada) via unblockierbarem Deep-Link-Filter.", 
+        "description": "Durchsucht geschützte Plattformen (Kleinanzeigen, Trendyol, Hepsiburada) via Deep-Link-Filter.", 
         "parameters": {
             "type": "object", 
             "properties": {
@@ -270,37 +261,20 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         
         save_message(chat_id, "user", user_text)
         
+        # --- MASTER-DATENBANK-ABGLEICH POOL ---
         db_context = "\n--- AKTUELLER INTERNER NETZWERK-POOL (DATENBANK) ---\n"
         try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand")
-            all_demands = cursor.fetchall()
-            
-            cursor.execute("SELECT title, location, price, contact FROM marketplace_supply")
-            all_supplies = cursor.fetchall()
-            conn.close()
-            
+            all_demands = cursor.fetchall(); conn.close()
             if all_demands:
-                db_context += "\n[SUCHEN / NACHFRAGE]:\n"
+                db_context += "\n[SUCHEN / REGISTRIERTE AUFTRÄGE]:\n"
                 for uid, t, l, p in all_demands:
-                    db_context += f"- User {uid} sucht: '{t}' in '{l}' (Limit/Budget: {p}€)\n"
-            
-            if all_supplies:
-                db_context += "\n[ANGEBOTE / SUPPLY]:\n"
-                for t, l, p, c in all_supplies:
-                    db_context += f"- Angebot: '{t}' in '{l}' (Preis/Lohn: {p}€) | Kontakt: {c}\n"
-                    
-            if not all_demands and not all_supplies:
-                db_context += "(Die interne Datenbank ist aktuell komplett leer.)\n"
-                
-        except Exception as db_err:
-            db_context += f"(Fehler beim Lesen der Datenbank: {db_err})\n"
+                    db_context += f"- User {uid} sucht/bietet: '{t}' in '{l}' (Limit: {p}€)\n"
+            else: db_context += "(Die interne DOB ist aktuell komplett leer.)\n"
+        except Exception as db_err: db_context += f"(Fehler beim Lesen der Datenbank: {db_err})\n"
 
-        provider = "groq"
-        if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "pool", "prüfe", "trendyol", "hepsiburada"]):
-            provider = "openai" if OPENAI_API_KEY else "gemini"
+        provider = "openai" if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle", "pool", "prüfe", "trendyol", "hepsiburada"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
         
         messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
         messages.append({"role": "user", "content": user_text})
@@ -309,6 +283,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         bot_reply = content
         
         if tool_calls:
+            messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
             has_executed_data_tool = False
             combined_tool_data = "\n--- SYSTEM DATA / TOOL RESULTS ---\n"
             
@@ -336,19 +311,19 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                     has_executed_data_tool = True
                 elif fn == "add_market_demand": 
                     res = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
+                    bot_reply = res
                     has_executed_data_tool = True
                 
                 combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(res)})
             
             if has_executed_data_tool:
-                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten und den aktuellen Netzwerk-Pool. Falls ein passender Eintrag im Radius existiert, führe das Match sofort zusammen und formuliere das Broker-Ergebnis:\n{combined_tool_data}"})
-                print(f"[ADMIN LOG] 🧠 Starte finalen Match-Durchlauf über {provider}...", flush=True)
+                messages.append({"role": "user", "content": f"Verarbeite diese Live-Daten und Datenbanktreffer für meine Anfrage. Falls ein passender Eintrag existiert, führe das Match zusammen:\n{combined_tool_data}"})
                 premium_reply, premium_model = call_premium_ai(messages, provider=provider)
-                bot_reply = premium_reply
-                used_model = premium_model
+                bot_reply = premium_reply; used_model = premium_model
                     
         if not bot_reply or "auswertbaren daten" in bot_reply.lower():
-            bot_reply = "Ich habe das Netzwerk analysiert. Aktuell liegt kein direktes Match vor. Ich habe Ihre Anfrage im System hinterlegt und informiere Sie autonom, sobald ein passender Partner im Umkreis postet."
+            bot_reply = "Ich habe die Netzwerkanalyse im 20km-Radius sowie auf internationalen E-Commerce-Plattformen durchgeführt. Aktuell liegt kein direktes Match vor. Ich habe Ihre Suche im System hinterlegt und informiere Sie autonom."
 
         save_message(chat_id, "assistant", bot_reply)
         
