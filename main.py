@@ -185,16 +185,6 @@ def fetch_live_marketplace_data(query, platform_filter="all"):
     except:
         return []
 
-def calculate_local_distance(location_a, location_b):
-    try:
-        geo = Nominatim(user_agent="tg_matching_broker")
-        loc_a, loc_b = geo.geocode(location_a), geo.geocode(location_b)
-        if loc_a and loc_b:
-            dist = geodesic((loc_a.latitude, loc_a.longitude), (loc_b.latitude, loc_b.longitude)).km
-            return json.dumps({"distance_km": round(dist, 2), "status": "success"})
-    except: pass
-    return json.dumps({"error": "Standort nicht auflösbar", "status": "failed"})
-
 def call_groq_text(messages_list):
     try:
         res = groq_client.chat.completions.create(model=GROQ_TEXT_MODEL, messages=messages_list, temperature=0.5, max_tokens=1024, tools=ai_tools, tool_choice="auto")
@@ -270,31 +260,11 @@ def process_message_async(chat_id, user_text, loading_msg_id):
         u_low = user_text.lower()
         save_message(chat_id, "user", user_text)
         
-        platform_filter = "all"
-        if "trendyol" in u_low: platform_filter = "trendyol"
-        elif "amazon" in u_low: platform_filter = "amazon"
-        elif "ebay" in u_low: platform_filter = "ebay"
-        elif "kleinanzeigen" in u_low: platform_filter = "kleinanzeigen"
-        
-        clean_keyword = user_text.replace("Suche", "").replace("suche", "").strip()
-        if not clean_keyword: clean_keyword = "jacke"
-        
-        live_products = fetch_live_marketplace_data(clean_keyword, platform_filter)
-        
-        if live_products and platform_filter != "all" or len(clean_keyword) > 3 and "suche" in u_low:
-            user_key = f"{chat_id}_{int(time.time())}"
-            user_live_searches[user_key] = live_products
-            
-            url_del = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
-            requests.post(url_del, json={"chat_id": chat_id, "message_id": loading_msg_id})
-            send_shopping_page(chat_id, user_key, page=0)
-            return
-
-        messages = [{"role": "system", "content": "Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. Du hast die Fähigkeit, deinen eigenen Quellcode über die update_github_code Funktion anzupassen, wenn es gewünscht wird. Antworte ansonsten kurz und präzise."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
-        
-        msg_obj, used_model = call_groq_text(messages)
-        
         url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+
+        # 1. SCHRITT: ZUERST prüfen, ob es ein Code- oder GitHub-Befehl ist!
+        messages = [{"role": "system", "content": "Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. Wenn der Benutzer verlangt, Code zu ändern, zu korrigieren oder auf GitHub hochzuladen, musst du unbedingt das Tool update_github_code verwenden. Antworte ansonsten normal."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
+        msg_obj, used_model = call_groq_text(messages)
         
         if hasattr(msg_obj, "tool_calls") and msg_obj.tool_calls:
             for tool_call in msg_obj.tool_calls:
@@ -307,8 +277,34 @@ def process_message_async(chat_id, user_text, loading_msg_id):
                     )
                     requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": result_msg})
                     return
-        
+
+        # Wenn die KI einen reinen Text-Befehl als Code-Antwort generiert hat (falls kein Tool-Call getriggert wurde)
         bot_reply = msg_obj.content if hasattr(msg_obj, "content") else str(msg_obj)
+        if "github" in u_low or "code" in u_low or "funktion" in u_low or "update" in u_low:
+            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply})
+            return
+
+        # 2. SCHRITT: Erst wenn es KEIN Programmierbefehl ist, greift die Marktplatzsuche
+        platform_filter = "all"
+        if "trendyol" in u_low: platform_filter = "trendyol"
+        elif "amazon" in u_low: platform_filter = "amazon"
+        elif "ebay" in u_low: platform_filter = "ebay"
+        elif "kleinanzeigen" in u_low: platform_filter = "kleinanzeigen"
+        
+        clean_keyword = user_text.replace("Suche", "").replace("suche", "").strip()
+        if not clean_keyword: clean_keyword = "jacke"
+        
+        live_products = fetch_live_marketplace_data(clean_keyword, platform_filter)
+        
+        if live_products:
+            user_key = f"{chat_id}_{int(time.time())}"
+            user_live_searches[user_key] = live_products
+            
+            url_del = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+            requests.post(url_del, json={"chat_id": chat_id, "message_id": loading_msg_id})
+            send_shopping_page(chat_id, user_key, page=0)
+            return
+
         requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply})
     except Exception as e:
         try:
@@ -401,7 +397,7 @@ def webhook():
             text = msg.get("text", msg.get("caption", ""))
             if text:
                 url_loading = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                res = requests.post(url_loading, json={"chat_id": chat_id, "text": "Analysiere Marktplatz..."}).json()
+                res = requests.post(url_loading, json={"chat_id": chat_id, "text": "Verarbeite Anfrage..."}).json()
                 lid = res.get("result", {}).get("message_id")
                 if lid: executor.submit(process_message_async, chat_id, text, lid)
     except: pass
