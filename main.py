@@ -122,9 +122,26 @@ def search_protected_marketplace(platform, query):
             actor = "apify/google-maps-scraper"
             
         url = f"https://api.apify.com/v2/acts/{actor}/run-sync?token={APIFY_TOKEN}"
-        res = requests.post(url, json={"searchQueries": [query], "maxItems": 3}, timeout=20)
-        if res.status_code == 200: return json.dumps(res.json()[:3], ensure_ascii=False)
-    except Exception as e: return f"Scraping Fehler für {platform}: {e}"
+        
+        run_input = {
+            "search": query,
+            "query": query,
+            "searchQueries": [query],
+            "maxItems": 3,
+            "limit": 3
+        }
+        
+        print(f"[ADMIN LOG] 🚀 Starte Apify-Scraper ({actor}) für Begriff: {query}...", flush=True)
+        res = requests.post(url, json=run_input, timeout=50)
+        
+        if res.status_code == 200: 
+            data = res.json()
+            print(f"[ADMIN LOG] ✅ Apify erfolgreich! Daten erhalten: {str(data)[:100]}...", flush=True)
+            return json.dumps(data[:3], ensure_ascii=False)
+        else:
+            print(f"[ADMIN LOG] ⚠️ Apify lieferte Status Code: {res.status_code}", flush=True)
+    except Exception as e: 
+        return f"Scraping Fehler für {platform}: {e}"
     return f"Keine Daten auf {platform} gefunden."
 
 def send_negotiation_email(to_email, subject, body):
@@ -161,7 +178,7 @@ ai_tools = [
     {"type": "function", "function": {"name": "add_market_demand", "description": "Hinterlegt eine dauerhafte Matching-Aufgabe.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "location": {"type": "string"}, "max_price": {"type": "number"}}, "required": ["title", "location", "max_price"]}}}
 ]
 
-# --- AKTUALISIERTER SYSTEM PROMPT ---
+# --- SYSTEM PROMPT ---
 SYSTEM_PROMPT = (
     "Du bist 'KI Sekretär', ein autonomer Broker und globaler Matchmaker.\n"
     "Regeln für Werkzeuge:\n"
