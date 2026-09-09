@@ -4,6 +4,6 @@ requests
 Pillow
 onnxruntime
 duckduckgo_search
-
+geopy
 
 
