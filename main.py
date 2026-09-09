@@ -274,54 +274,73 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             else: db_context += "(Die interne DOB ist aktuell komplett leer.)\n"
         except Exception as db_err: db_context += f"(Fehler beim Lesen der Datenbank: {db_err})\n"
 
-        provider = "openai" if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle", "pool", "prüfe", "trendyol", "hepsiburada"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
+        # Feststellen des Providers
+        u_low = user_text.lower()
+        provider = "openai" if any(k in u_low for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle", "pool", "prüfe", "trendyol", "hepsiburada"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
         
-        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
-        messages.append({"role": "user", "content": user_text})
-        
-        content, used_model, tool_calls = call_groq_text(messages)
-        bot_reply = content
-        
-        if tool_calls:
-            messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
-            has_executed_data_tool = False
-            combined_tool_data = "\n--- SYSTEM DATA / TOOL RESULTS ---\n"
+        # 🚀 NEU: AUTONOMER DIREKT-BYPASS FÜR TÜRKEI-PLATFORMEN
+        if "trendyol" in u_low or "hepsiburada" in u_low:
+            print("[ADMIN LOG] 🇹🇷 Türkei-Plattform erkannt. Starte unblockierbaren Direkt-Bypass...", flush=True)
+            domain = "trendyol.com" if "trendyol" in u_low else "hepsiburada.com"
+            clean_keyword = user_text.replace("Suche", "").replace("auf Trendyol", "").replace("nach:", "").strip()
             
-            for tc in tool_calls:
-                fn, args = tc.function.name, json.loads(tc.function.arguments)
-                res = ""
-                if fn == "save_user_fact": 
-                    save_user_fact(chat_id, args.get("key"), args.get("value"))
-                    res = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
-                elif fn == "search_web": 
-                    clean_query = args.get("query").replace("Suche", "").replace("ich wohne in", "").strip()
-                    res, _ = search_web(clean_query)
-                    has_executed_data_tool = True
-                elif fn == "calculate_local_distance": 
-                    res = calculate_local_distance(args.get("location_a"), args.get("location_b"))
-                    has_executed_data_tool = True
-                elif fn == "verify_reviews_authenticity": 
-                    res = verify_reviews_authenticity(args.get("target_name"))
-                    has_executed_data_tool = True
-                elif fn == "search_protected_marketplace": 
-                    res = search_protected_marketplace(args.get("platform"), args.get("query"))
-                    has_executed_data_tool = True
-                elif fn == "send_negotiation_email": 
-                    res = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
-                    has_executed_data_tool = True
-                elif fn == "add_market_demand": 
-                    res = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
-                    bot_reply = res
-                    has_executed_data_tool = True
+            # Suchmaschine sofort ohne LLM-Erlaubnis abfragen
+            res_text, success = search_web(f"site:{domain} {clean_keyword}")
+            
+            messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
+            messages.append({"role": "user", "content": f"{user_text}\n\n--- LIVE-ERGEBNISSE VON {domain.upper()} ---\n{res_text}"})
+            
+            # Direkt an Premium AI übergeben für das finale Verhandlungsangebot
+            bot_reply, used_model = call_premium_ai(messages, provider=provider)
+            
+        else:
+            # Standard-Ablauf für lokale Gesuche und normale Aufgaben
+            messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
+            messages.append({"role": "user", "content": user_text})
+            
+            content, used_model, tool_calls = call_groq_text(messages)
+            bot_reply = content
+            
+            if tool_calls:
+                messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
+                has_executed_data_tool = False
+                combined_tool_data = "\n--- SYSTEM DATA / TOOL RESULTS ---\n"
                 
-                combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(res)})
-            
-            if has_executed_data_tool:
-                messages.append({"role": "user", "content": f"Verarbeite diese Live-Daten und Datenbanktreffer für meine Anfrage. Falls ein passender Eintrag existiert, führe das Match zusammen:\n{combined_tool_data}"})
-                premium_reply, premium_model = call_premium_ai(messages, provider=provider)
-                bot_reply = premium_reply; used_model = premium_model
+                for tc in tool_calls:
+                    fn, args = tc.function.name, json.loads(tc.function.arguments)
+                    res = ""
+                    if fn == "save_user_fact": 
+                        save_user_fact(chat_id, args.get("key"), args.get("value"))
+                        res = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
+                    elif fn == "search_web": 
+                        clean_query = args.get("query").replace("Suche", "").replace("ich wohne in", "").strip()
+                        res, _ = search_web(clean_query)
+                        has_executed_data_tool = True
+                    elif fn == "calculate_local_distance": 
+                        res = calculate_local_distance(args.get("location_a"), args.get("location_b"))
+                        has_executed_data_tool = True
+                    elif fn == "verify_reviews_authenticity": 
+                        res = verify_reviews_authenticity(args.get("target_name"))
+                        has_executed_data_tool = True
+                    elif fn == "search_protected_marketplace": 
+                        res = search_protected_marketplace(args.get("platform"), args.get("query"))
+                        has_executed_data_tool = True
+                    elif fn == "send_negotiation_email": 
+                        res = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
+                        has_executed_data_tool = True
+                    elif fn == "add_market_demand": 
+                        res = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
+                        bot_reply = res
+                        has_executed_data_tool = True
                     
+                    combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(res)})
+                
+                if has_executed_data_tool:
+                    messages.append({"role": "user", "content": f"Verarbeite diese Live-Daten und Datenbanktreffer für meine Anfrage. Falls ein passender Eintrag existiert, führe das Match zusammen:\n{combined_tool_data}"})
+                    premium_reply, premium_model = call_premium_ai(messages, provider=provider)
+                    bot_reply = premium_reply; used_model = premium_model
+                        
         if not bot_reply or "auswertbaren daten" in bot_reply.lower():
             bot_reply = "Ich habe die Netzwerkanalyse im 20km-Radius sowie auf internationalen E-Commerce-Plattformen durchgeführt. Aktuell liegt kein direktes Match vor. Ich habe Ihre Suche im System hinterlegt und informiere Sie autonom."
 
