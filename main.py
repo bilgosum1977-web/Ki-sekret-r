@@ -1,276 +1,259 @@
-import os
-import io
-import sqlite3
-import json
-import concurrent.futures
+import os, io, sqlite3, json, base64, time, threading, concurrent.futures, smtplib
+from email.mime.text import MIMEText
 from flask import Flask, request
-from groq import Groq
 import requests
-from PIL import Image
+from groq import Groq
 from duckduckgo_search import DDGS
+from geopy.distance import geodesic
+from geopy.geocoders import Nominatim
 
 app = Flask(__name__)
 
-# --- KONFIGURATION & API-SCHLÜSSEL ---
+# --- CONFIGURATION & KEYS ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
 
-if not TELEGRAM_BOT_TOKEN:
-    print("[ADMIN LOG] ❌ KRITISCH: Kein Telegram Token gefunden!", flush=True)
-else:
-    print(f"[ADMIN LOG] ✅ Telegram Token erfolgreich geladen.", flush=True)
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 else:
-    print("[ADMIN LOG] ❌ KRITISCH: Kein Groq API Key gefunden!", flush=True)
+    print("[ADMIN LOG] ⚠️ Kein Groq API Key gefunden!", flush=True)
 
+# Aktualisiert auf das gewünschte Modell
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
-GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
+GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 
+INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
 user_balances = {}
-INITIAL_BALANCE = 10000
-MAX_HISTORY_LENGTH = 15
 
-# --- DATENBANK SETUP (SQLite) ---
-DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
-
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            role TEXT,
-            content TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_profile (
-            user_id TEXT,
-            fact_key TEXT,
-            fact_value TEXT,
-            PRIMARY KEY (user_id, fact_key)
-        )
-    ''')
+    cursor.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS user_profile (user_id TEXT, fact_key TEXT, fact_value TEXT, PRIMARY KEY (user_id, fact_key))')
+    cursor.execute('CREATE TABLE IF NOT EXISTS marketplace_demand (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, title TEXT, location TEXT, max_price REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     conn.commit()
     conn.close()
 
 def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)', (str(user_id), role, content))
-    conn.commit()
-    conn.close()
+    conn.cursor().execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)', (str(user_id), role, content))
+    conn.commit(); conn.close()
 
 def get_history(user_id, limit=MAX_HISTORY_LENGTH):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?', (str(user_id), limit))
-    rows = cursor.fetchall()
-    conn.close()
-    return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
+    rows = cursor.fetchall(); conn.close()
+    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
 def save_user_fact(user_id, key, value):
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO user_profile (user_id, fact_key, fact_value) 
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, fact_key) DO UPDATE SET fact_value = excluded.fact_value
-    ''', (str(user_id), key, value))
-    conn.commit()
-    conn.close()
+    conn.cursor().execute('INSERT INTO user_profile (user_id, fact_key, fact_value) VALUES (?, ?, ?) ON CONFLICT(user_id, fact_key) DO UPDATE SET fact_value = excluded.fact_value', (str(user_id), key, value))
+    conn.commit(); conn.close()
 
 def get_user_profile(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT fact_key, fact_value FROM user_profile WHERE user_id = ?', (str(user_id),))
-    rows = cursor.fetchall()
-    conn.close()
-    return {row[0]: row[1] for row in rows}
+    rows = cursor.fetchall(); conn.close()
+    return {r[0]: r[1] for r in rows}
+
+def add_market_demand(user_id, title, location, max_price):
+    conn = sqlite3.connect(DB_PATH)
+    conn.cursor().execute('INSERT INTO marketplace_demand (user_id, title, location, max_price) VALUES (?, ?, ?, ?)', (str(user_id), title, location, float(max_price)))
+    conn.commit(); conn.close()
+    return "Suchauftrag erfolgreich hinterlegt! Ich scanne den Markt nun alle 30 Minuten autonom."
 
 init_db()
 
-# --- HILFSFUNKTIONEN & TOOLS ---
+# --- AGENT TOOLS ---
 def search_web(query):
     try:
-        print(f"[ADMIN LOG] 🔍 Router / Live-Websuche gestartet für: {query}", flush=True)
+        res = requests.get(f"{SEARXNG_URL}/search", params={"q": query, "format": "json"}, timeout=5)
+        if res.status_code == 200:
+            items = res.json().get("results", [])[:3]
+            if items: return "\n".join([f"• {i.get('title','')}: {i.get('content','')} ({i.get('url','')})" for i in items]), True
+    except: pass
+    try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
-            if not results:
-                return "Keine aktuellen Web-Ergebnisse gefunden.", False
-            formatted_results = "\n".join([f"• {item.get('title', '')}: {item.get('body', '')} (Quelle: {item.get('href', '')})" for item in results])
-            return formatted_results, True
-    except Exception as e:
-        print(f"[ADMIN LOG] ⚠️ Web Search Fehler: {e}", flush=True)
-        return "Websuche derzeit nicht erreichbar.", False
+            items = list(ddgs.text(query, max_results=3))
+            if items: return "\n".join([f"• {i.get('title','')}: {i.get('body','')} ({i.get('href','')})" for i in items]), True
+    except: pass
+    return "Keine Web-Ergebnisse gefunden.", False
+
+def calculate_local_distance(location_a, location_b):
+    try:
+        geo = Nominatim(user_agent="tg_matching_broker")
+        loc_a, loc_b = geo.geocode(location_a), geo.geocode(location_b)
+        if loc_a and loc_b:
+            dist = geodesic((loc_a.latitude, loc_a.longitude), (loc_b.latitude, loc_b.longitude)).km
+            return json.dumps({"distance_km": round(dist, 2), "status": "success"})
+    except Exception as e: return json.dumps({"error": str(e), "status": "failed"})
+    return json.dumps({"error": "Standort nicht auflösbar", "status": "failed"})
+
+def verify_reviews_authenticity(target_name):
+    data, _ = search_web(f"{target_name} erfahrungen bewertungen forum kritik")
+    return f"Ergebnisse für '{target_name}':\n\n{data}"
+
+def search_protected_marketplace(platform, query):
+    if not APIFY_TOKEN: return "Apify Token fehlt."
+    try:
+        actor = "apify/kleinanzeigen-scraper" if "klein" in platform.lower() else "apify/google-maps-scraper"
+        res = requests.post(f"https://apify.com{actor}/run-sync?token={APIFY_TOKEN}", json={"searchQueries": [query], "maxItems": 3}, timeout=15)
+        if res.status_code == 200: return json.dumps(res.json()[:3])
+    except Exception as e: return f"Scraping Fehler: {e}"
+    return "Keine Daten gefunden."
+
+def send_negotiation_email(to_email, subject, body):
+    if not all([SMTP_USER, SMTP_PASSWORD]): return "SMTP Konfiguration fehlt."
+    try:
+        msg = MIMEText(body, 'plain', 'utf-8')
+        msg['Subject'], msg['From'], msg['To'] = subject, SMTP_USER, to_email
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls(); server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_USER, [to_email], msg.as_string()); server.quit()
+        return f"E-Mail erfolgreich an {to_email} gesendet!"
+    except Exception as e: return f"E-Mail Fehler: {e}"
 
 ai_tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "save_user_fact",
-            "description": "Speichert oder aktualisiert einen wichtigen Fakt über den User.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string", "description": "Name des Fakts."},
-                    "value": {"type": "string", "description": "Wert dazu."}
-                },
-                "required": ["key", "value"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "Führt eine Live-Websuche im Internet durch.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Der Suchbegriff für die Live-Abfrage."}
-                },
-                "required": ["query"]
-            }
-        }
-    }
+    {"type": "function", "function": {"name": "save_user_fact", "description": "Speichert Fakten über den User.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
+    {"type": "function", "function": {"name": "search_web", "description": "Websuche über SearXNG.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "calculate_local_distance", "description": "Berechnet Distanz (in km) für 10km-Matching.", "parameters": {"type": "object", "properties": {"location_a": {"type": "string"}, "location_b": {"type": "string"}}, "required": ["location_a", "location_b"]}}},
+    {"type": "function", "function": {"name": "verify_reviews_authenticity", "description": "Sammelt Rezensionen zur Fake-Analyse.", "parameters": {"type": "object", "properties": {"target_name": {"type": "string"}}, "required": ["target_name"]}}},
+    {"type": "function", "function": {"name": "search_protected_marketplace", "description": "Durchsucht geschützte Plattformen via Apify.", "parameters": {"type": "object", "properties": {"platform": {"type": "string"}, "query": {"type": "string"}}, "required": ["platform", "query"]}}},
+    {"type": "function", "function": {"name": "send_negotiation_email", "description": "Sendet Verhandlungs-Mails.", "parameters": {"type": "object", "properties": {"to_email": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["to_email", "subject", "body"]}}},
+    {"type": "function", "function": {"name": "add_market_demand", "description": "Hinterlegt eine dauerhafte Matching-Aufgabe.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "location": {"type": "string"}, "max_price": {"type": "number"}}, "required": ["title", "location", "max_price"]}}}
 ]
 
-SYSTEM_PROMPT = (
-    "Du bist 'KI Sekretär', ein hochkompetenter, proaktiver KI-Assistent. "
-    "Nutze die bereitgestellten Websuchergebnisse als absolute Wahrheit und verlasse dich nicht auf veraltetes Trainingswissen."
-)
+SYSTEM_PROMPT = "Du bist 'KI Sekretär', ein autonomer Broker. Regeln: 1. Nutze 'calculate_local_distance' für max 10km Radius. 2. Prüfe Rezensionen mit 'verify_reviews_authenticity' auf Fake-Muster. 3. Nutze 'search_protected_marketplace' bei Bedarf. 4. Führe Verhandlungen via 'send_negotiation_email'."
 
-def clean_think_tags(text):
-    if not text:
-        return ""
-    if "</think>" in text:
-        return text.split("</think>")[-1].strip()
-    return text
-
-def format_reply_for_user(chat_id, text, model_name="", used_duckduckgo=False):
-    if str(chat_id) == ADMIN_USER_ID:
-        admin_info = f"\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}"
-        if used_duckduckgo:
-            admin_info += "\n🔍 Tool-Status: DuckDuckGo-Router erfolgreich eingesetzt."
-        return f"{text}{admin_info}"
-    return text
-
-def send_telegram_message(chat_id, text, model_name="", used_duckduckgo=False):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    final_text = format_reply_for_user(chat_id, text, model_name, used_duckduckgo)
+# --- ROUTER & PIPELINES ---
+def call_groq_text(messages_list):
     try:
-        response = requests.post(url, json={"chat_id": chat_id, "text": final_text}, timeout=5)
-        res_json = response.json()
-        if res_json.get("ok"):
-            return res_json["result"]["message_id"]
-    except Exception as e:
-        print(f"Fehler beim Telegram-Senden: {e}")
+        res = groq_client.chat.completions.create(model=GROQ_TEXT_MODEL, messages=messages_list, tools=ai_tools, tool_choice="auto", temperature=0.5, max_tokens=1024)
+        msg = res.choices[0].message
+        content = msg.content or ""
+        if "</think>" in content: content = content.split("</think>")[-1].strip()
+        return content, f"Groq ({GROQ_TEXT_MODEL})", getattr(msg, 'tool_calls', None)
+    except Exception as e: return f"Fehler: {e}", "Groq (Error)", None
+
+def call_groq_vision(user_text, image_bytes):
+    try:
+        b64 = base64.b64encode(image_bytes).decode('utf-8')
+        res = groq_client.chat.completions.create(model=GROQ_VISION_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": user_text or "Analysiere das Bild für den Verhandlungsloop."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], temperature=0.5)
+        content = res.choices[0].message.content
+        if "</think>" in content: content = content.split("</think>")[-1].strip()
+        return content, "Groq Vision"
+    except Exception as e: return f"Vision Fehler: {e}", "Groq Vision (Error)"
+
+def call_premium_ai(messages_list, provider="groq"):
+    content, model_info, _ = call_groq_text(messages_list)
+    return content, model_info
+
+# --- TELEGRAM HELPER ---
+def send_telegram_message(chat_id, text, model_name=""):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    final_text = f"{text}\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}" if str(chat_id) == ADMIN_USER_ID and model_name else text
+    try:
+        res = requests.post(url, json={"chat_id": chat_id, "text": final_text}, timeout=5).json()
+        if res.get("ok"): 
+            return res["result"]["message_id"]
+    except Exception as e: 
+        print(f"Telegram Senden Fehler: {e}")
     return None
 
-def edit_telegram_message(chat_id, message_id, text, model_name="", used_duckduckgo=False):
+def edit_telegram_message(message_id, chat_id, text, model_name=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    final_text = format_reply_for_user(chat_id, text, model_name, used_duckduckgo)
+    final_text = f"{text}\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}" if str(chat_id) == ADMIN_USER_ID and model_name else text
     try:
         requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": final_text}, timeout=5)
-    except Exception as e:
-        print(f"Fehler beim Bearbeiten: {e}")
+    except Exception as e: 
+        print(f"Telegram Edit Fehler: {e}")
 
 def get_telegram_file_bytes(file_id):
     try:
         r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=5).json()
         if not r.get("ok"): return None
         return requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{r['result']['file_path']}", timeout=10).content
-    except Exception as e:
-        print(f"Fehler Bild-Download: {e}")
+    except: 
         return None
 
-def call_groq_text(messages_list):
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_TEXT_MODEL, messages=messages_list, tools=ai_tools, tool_choice="auto", temperature=0.7, max_tokens=1024
-        )
-        msg = response.choices[0].message
-        content = clean_think_tags(msg.content or "")
-        return content, f"Groq ({GROQ_TEXT_MODEL})", getattr(msg, 'tool_calls', None)
-    except Exception as e:
-        print(f"Groq Fehler: {e}", flush=True)
-        return "", "Groq (Fehler)", None
-
-def call_groq_vision(user_text, image_bytes):
-    try:
-        b64 = io.base64.b64encode(image_bytes).decode('utf-8')
-        response = groq_client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
-            messages=[{"role": "user", "content": [{"type": "text", "text": user_text or "Bild analysieren"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
-            temperature=0.5, max_tokens=1024
-        )
-        return clean_think_tags(response.choices[0].message.content), "Qwen Vision"
-    except Exception as e:
-        print(f"Vision Fehler: {e}", flush=True)
-        return "Bildanalyse-Fehler", "Groq (Fehler)"
-
+# --- ASYNCHRONE WORKER PIPELINE ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
-        save_message(chat_id, "user", user_text or "{Bild gesendet}")
-        
+        save_message(chat_id, "user", user_text or "(Bild gesendet)")
+
         profile = get_user_profile(chat_id)
         history = get_history(chat_id, limit=MAX_HISTORY_LENGTH)
-        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(profile, ensure_ascii=False)}"}] + history
+        messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nUser-Profil: {json.dumps(profile, ensure_ascii=False)}"}] + history
 
-        used_duckduckgo = False
-        tool_calls = None
+        bot_reply, used_model_name = "", ""
 
         if image_bytes:
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
         else:
-            # --- SMART ROUTER / ERZWUNGENER WECH ---
-            # Wenn der User nach Preisen, Modellen oder S26/S27/Geräten fragt, triggern wir die Suche direkt vorab!
-            lower_text = user_text.lower()
-            if any(keyword in lower_text for keyword in ["samsung", "s26", "s27", "preis", "ultra", "kaufen", "gibt es", "suche"]):
-                print(f"[ADMIN LOG] ⚡ Smart Router greift: Erzwinge Websuche für '{user_text}'", flush=True)
-                search_result, used_duckduckgo = search_web(user_text)
+            messages.append({"role": "user", "content": user_text})
+            
+            provider = "groq"
+            if any(keyword in user_text.lower() for keyword in ["verhandle", "kaufen", "vertrag", "preis drücken", "match", "bestelle"]):
+                provider = "openai" if OPENAI_API_KEY else "gemini"
+            
+            content, used_model_name, tool_calls = call_groq_text(messages)
+            bot_reply = content
+
+            if tool_calls:
+                messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
                 
-                # Wir füttern das Modell direkt mit dem echten Suchergebnis
-                messages.append({"role": "user", "content": user_text})
-                messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": "forced_router", "type": "function", "function": {"name": "search_web", "arguments": json.dumps({"query": user_text})}}]})
-                messages.append({"role": "tool", "tool_call_id": "forced_router", "content": search_result})
+                for tc in tool_calls:
+                    func_name = tc.function.name
+                    args = json.loads(tc.function.arguments)
+                    print(f"[ADMIN LOG] 🛠️ Tool-Aufruf: {func_name} mit {args}", flush=True)
+
+                    tool_result = ""
+                    if func_name == "save_user_fact":
+                        save_user_fact(chat_id, args.get("key"), args.get("value"))
+                        tool_result = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
+                    elif func_name == "search_web":
+                        tool_result, _ = search_web(args.get("query"))
+                    elif func_name == "calculate_local_distance":
+                        tool_result = calculate_local_distance(args.get("location_a"), args.get("location_b"))
+                    elif func_name == "verify_reviews_authenticity":
+                        tool_result = verify_reviews_authenticity(args.get("target_name"))
+                    elif func_name == "search_protected_marketplace":
+                        tool_result = search_protected_marketplace(args.get("platform"), args.get("query"))
+                    elif func_name == "send_negotiation_email":
+                        tool_result = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
+                    elif func_name == "add_market_demand":
+                        tool_result = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
+
+                    messages.append({"role": "tool", "content": str(tool_result), "tool_call_id": tc.id})
                 
-                bot_reply, used_model_name, _ = call_groq_text(messages)
-            else:
-                # Normaler Weg via Groq-Textmodell
-                bot_reply, used_model_name, tool_calls = call_groq_text(messages)
-                
-                if tool_calls:
-                    for tc in tool_calls:
-                        func_name = tc.function.name
-                        args = json.loads(tc.function.arguments)
-                        if func_name == "save_user_fact":
-                            save_user_fact(chat_id, args.get("key"), args.get("value"))
-                            bot_reply = f"Habe mir gemerkt: {args.get('key')} = {args.get('value')}"
-                        elif func_name == "search_web":
-                            search_result, used_duckduckgo = search_web(args.get("query"))
-                            messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
-                            messages.append({"role": "tool", "tool_call_id": tc.id, "content": search_result})
-                            bot_reply, used_model_name, _ = call_groq_text(messages)
+                bot_reply, used_model_name = call_premium_ai(messages, provider=provider)
 
         if not bot_reply:
-            bot_reply = "Hier sind die aktuellen Informationen dazu."
-            
+            bot_reply = "Aktion erfolgreich ausgeführt."
+
         save_message(chat_id, "assistant", bot_reply)
 
         if loading_msg_id:
-            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name, used_duckduckgo=used_duckduckgo)
+            edit_telegram_message(loading_msg_id, chat_id, bot_reply, model_name=used_model_name)
         else:
-            send_telegram_message(chat_id, bot_reply, model_name=used_model_name, used_duckduckgo=used_duckduckgo)
+            send_telegram_message(chat_id, bot_reply, model_name=used_model_name)
+
     except Exception as e:
-        print(f"Worker Fehler: {e}", flush=True)
+        print(f"[ADMIN LOG] ❌ Worker Fehler: {e}", flush=True)
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
@@ -283,11 +266,10 @@ def webhook():
         chat_id = str(msg["chat"]["id"])
         user_text = msg.get("text", msg.get("caption", ""))
         image_bytes = get_telegram_file_bytes(msg["photo"][-1]["file_id"]) if "photo" in msg else None
-        
-        if not user_text and image_bytes: user_text = "Was ist auf diesem Bild?"
+
         if not user_text and not image_bytes: return "OK", 200
 
-        loading_msg_id = send_telegram_message(chat_id, "Suche im Web..." if not image_bytes else "Analysiere...")
+        loading_msg_id = send_telegram_message(chat_id, "Bearbeite Anfrage..." if not image_bytes else "Analysiere Bild...")
         executor.submit(process_message_async, chat_id, user_text, image_bytes, loading_msg_id)
     except Exception as e:
         print(f"Webhook Fehler: {e}", flush=True)
@@ -295,7 +277,7 @@ def webhook():
 
 @app.route("/ping", methods=["GET"])
 def ping():
-    return "Bot is alive!", 200
+    return "Bot is alive and broker-ready!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
