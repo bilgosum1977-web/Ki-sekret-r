@@ -54,6 +54,66 @@ def get_history(user_id, limit=MAX_HISTORY_LENGTH):
 
 init_db()
 
+# --- GITHUB UPDATE TOOL ---
+def update_github_code(file_path, new_content, commit_message):
+    """Aktualisiert oder erstellt eine Datei im GitHub-Repository, wodurch Render einen automatischen Neustart triggert."""
+    token = os.getenv("GITHUB_TOKEN")
+    repo = os.getenv("GITHUB_REPO") # Format: "bilgosum1977-web/Ki-sekret-r"
+    
+    if not token or not repo:
+        return "Fehler: GITHUB_TOKEN oder GITHUB_REPO sind auf Render nicht gesetzt."
+        
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
+    api_url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    
+    try:
+        get_res = requests.get(api_url, headers=headers, timeout=5)
+        sha = None
+        if get_res.status_code == 200:
+            sha = get_res.json().get("sha")
+            
+        encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
+        
+        payload = {
+            "message": commit_message,
+            "content": encoded_content,
+            "branch": "main"
+        }
+        if sha:
+            payload["sha"] = sha
+            
+        put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
+        
+        if put_res.status_code in [200, 201]:
+            return f"Erfolgreich! Die Datei {file_path} wurde auf GitHub aktualisiert. Render baut den Bot in wenigen Sekunden neu auf!"
+        else:
+            return f"GitHub API Fehler ({put_res.status_code}): {put_res.text[:200]}"
+    except Exception as e:
+        return f"Fehler beim GitHub-Update: {str(e)}"
+
+# AI Tools Schema für die KI-Schnittstelle
+ai_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "update_github_code",
+            "description": "Aktualisiert den Quellcode des Bots auf GitHub (z.B. main.py), um neue Funktionen hinzuzufügen oder Code anzupassen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Pfad zur Quelldatei, standardmäßig 'main.py'"},
+                    "new_content": {"type": "string", "description": "Der komplette, neue Python-Quellcode für die Datei."},
+                    "commit_message": {"type": "string", "description": "Kurze Beschreibung der Code-Änderung (Commit Message)."}
+                },
+                "required": ["file_path", "new_content", "commit_message"]
+            }
+        }
+    }
+]
+
 # --- AGENT TOOLS & LIVE EXTRACTORS ---
 def search_web(query):
     try:
@@ -137,8 +197,8 @@ def calculate_local_distance(location_a, location_b):
 
 def call_groq_text(messages_list):
     try:
-        res = groq_client.chat.completions.create(model=GROQ_TEXT_MODEL, messages=messages_list, temperature=0.5, max_tokens=1024)
-        return res.choices[0].message.content or "", f"Groq ({GROQ_TEXT_MODEL})"
+        res = groq_client.chat.completions.create(model=GROQ_TEXT_MODEL, messages=messages_list, temperature=0.5, max_tokens=1024, tools=ai_tools, tool_choice="auto")
+        return res.choices[0].message, f"Groq ({GROQ_TEXT_MODEL})"
     except Exception as e: return f"Fehler: {e}", "Groq (Error)"
 
 def call_premium_ai(messages_list, provider="groq"):
@@ -154,8 +214,9 @@ def call_premium_ai(messages_list, provider="groq"):
             r = requests.post(url, json={"contents": contents}, timeout=10).json()
             return r['candidates'][0]['content']['parts'][0]['text'], "Google Gemini"
         except: pass
-    content, model_info = call_groq_text(messages_list)
-    return content, model_info
+    
+    msg_obj, model_info = call_groq_text(messages_list)
+    return msg_obj, model_info
 
 # --- SHOPPING INTERFACE & PAGINATION ---
 def send_shopping_page(chat_id, user_key, page=0, edit_id=None):
@@ -220,7 +281,7 @@ def process_message_async(chat_id, user_text, loading_msg_id):
         
         live_products = fetch_live_marketplace_data(clean_keyword, platform_filter)
         
-        if live_products:
+        if live_products and platform_filter != "all" or len(clean_keyword) > 3 and "suche" in u_low:
             user_key = f"{chat_id}_{int(time.time())}"
             user_live_searches[user_key] = live_products
             
@@ -229,12 +290,31 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             send_shopping_page(chat_id, user_key, page=0)
             return
 
-        messages = [{"role": "system", "content": "Du bist 'KI Sekretär', ein Broker. Antworte kurz."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
-        bot_reply, used_model = call_premium_ai(messages, provider="groq")
+        messages = [{"role": "system", "content": "Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. Du hast die Fähigkeit, deinen eigenen Quellcode über die update_github_code Funktion anzupassen, wenn es gewünscht wird. Antworte ansonsten kurz und präzise."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
+        
+        msg_obj, used_model = call_groq_text(messages)
         
         url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        
+        if hasattr(msg_obj, "tool_calls") and msg_obj.tool_calls:
+            for tool_call in msg_obj.tool_calls:
+                if tool_call.function.name == "update_github_code":
+                    args = json.loads(tool_call.function.arguments)
+                    result_msg = update_github_code(
+                        args.get("file_path", "main.py"),
+                        args["new_content"],
+                        args["commit_message"]
+                    )
+                    requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": result_msg})
+                    return
+        
+        bot_reply = msg_obj.content if hasattr(msg_obj, "content") else str(msg_obj)
         requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply})
-    except: pass
+    except Exception as e:
+        try:
+            url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Verarbeitungsfehler: {str(e)}"})
+        except: pass
 
 def handle_callback_query(callback_data, chat_id, message_id):
     if callback_data.startswith("page_"):
