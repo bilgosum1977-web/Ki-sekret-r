@@ -109,39 +109,31 @@ def verify_reviews_authenticity(target_name):
     return f"Ergebnisse für '{target_name}':\n\n{data}"
 
 def search_protected_marketplace(platform, query):
-    if not APIFY_TOKEN: return "Apify Token fehlt."
     try:
         p_low = platform.lower()
-        if "trendyol" in p_low:
-            actor = "apify/trendyol-scraper"
-        elif "hepsiburada" in p_low:
-            actor = "apify/hepsiburada-scraper"
-        elif "klein" in p_low:
-            actor = "apify/kleinanzeigen-scraper"
-        else:
-            actor = "apify/google-maps-scraper"
+        
+        # Falls es sich um Trendyol oder Hepsiburada handelt, nutzen wir den unblockierbaren SearXNG-Deep-Link
+        if "trendyol" in p_low or "hepsiburada" in p_low:
+            domain = "trendyol.com" if "trendyol" in p_low else "hepsiburada.com"
+            target_query = f"site:{domain} {query}"
+            print(f"[ADMIN LOG] 🌐 Nutze unblockierbaren Deep-Link-Filter für {platform}: {target_query}", flush=True)
             
+            res, success = search_web(target_query)
+            if success:
+                return res
+            return f"Keine aktuellen Treffer auf {domain} für '{query}' gefunden."
+            
+        # Für Kleinanzeigen bleibt der normale Apify-Weg aktiv, falls konfiguriert
+        if not APIFY_TOKEN: return "Apify Token fehlt für Kleinanzeigen."
+        actor = "apify/kleinanzeigen-scraper"
         url = f"https://api.apify.com/v2/acts/{actor}/run-sync?token={APIFY_TOKEN}"
-        
-        run_input = {
-            "search": query,
-            "query": query,
-            "searchQueries": [query],
-            "maxItems": 3,
-            "limit": 3
-        }
-        
-        print(f"[ADMIN LOG] 🚀 Starte Apify-Scraper ({actor}) für Begriff: {query}...", flush=True)
-        res = requests.post(url, json=run_input, timeout=50)
-        
+        run_input = {"searchQueries": [query], "maxItems": 3}
+        res = requests.post(url, json=run_input, timeout=30)
         if res.status_code == 200: 
-            data = res.json()
-            print(f"[ADMIN LOG] ✅ Apify erfolgreich! Daten erhalten: {str(data)[:100]}...", flush=True)
-            return json.dumps(data[:3], ensure_ascii=False)
-        else:
-            print(f"[ADMIN LOG] ⚠️ Apify lieferte Status Code: {res.status_code}", flush=True)
+            return json.dumps(res.json()[:3], ensure_ascii=False)
+            
     except Exception as e: 
-        return f"Scraping Fehler für {platform}: {e}"
+        return f"Fehler bei der Marktplatz-Suche auf {platform}: {e}"
     return f"Keine Daten auf {platform} gefunden."
 
 def send_negotiation_email(to_email, subject, body):
@@ -164,7 +156,7 @@ ai_tools = [
     {"type": "function", "function": {"name": "verify_reviews_authenticity", "description": "Sammelt Rezensionen zur Fake-Analyse.", "parameters": {"type": "object", "properties": {"target_name": {"type": "string"}}, "required": ["target_name"]}}},
     {"type": "function", "function": {
         "name": "search_protected_marketplace", 
-        "description": "Durchsucht geschützte Plattformen (Kleinanzeigen, Trendyol, Hepsiburada) via Apify-Scraper.", 
+        "description": "Durchsucht geschützte Plattformen (Kleinanzeigen, Trendyol, Hepsiburada) via unblockierbarem Deep-Link-Filter.", 
         "parameters": {
             "type": "object", 
             "properties": {
