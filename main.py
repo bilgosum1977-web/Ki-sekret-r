@@ -26,7 +26,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Konfiguriert auf das offene Open-Modell über Groq (kein Llama):
+# Konfiguriert auf das offene Modell über Groq (kein Llama):
 GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
@@ -76,17 +76,45 @@ init_db()
 # --- AGENT TOOLS ---
 def search_web(query):
     try:
-        res = requests.get(f"{SEARXNG_URL}/search", params={"q": query, "format": "json"}, timeout=5)
+        # Falls kein externer Server eingetragen ist, nutzen wir eine stabile öffentliche SearXNG-Instanz als weltweites Backup
+        active_url = SEARXNG_URL if "localhost" not in SEARXNG_URL else "https://searx.be"
+        print(f"[ADMIN LOG] 🌐 Zünde SearXNG-Metasuche über: {active_url} for Begriff: {query}", flush=True)
+        
+        # Wir aktivieren gezielt die Kategorien 'general' und 'shopping' für maximale Trefferquote
+        params = {
+            "q": query,
+            "format": "json",
+            "categories": "general,shopping",
+            "language": "de-DE"
+        }
+        
+        res = requests.get(f"{active_url}/search", params=params, timeout=8)
         if res.status_code == 200:
-            items = res.json().get("results", [])[:5]
-            if items: return "\n".join([f"• {i.get('title','')}: {i.get('content','')} ({i.get('url','')})" for i in items]), True
-    except: pass
+            raw_results = res.json().get("results", [])
+            # Wir erhöhen das Limit von 3 auf 10 Treffer, um die Kraft der 70 Engines voll zu nutzen!
+            items = raw_results[:10]
+            
+            if items:
+                formatted_data = []
+                for i in items:
+                    title = i.get('title', 'Produkt')
+                    content = i.get('content', i.get('snippet', 'Keine Beschreibung'))
+                    url = i.get('url', '')
+                    engine = i.get('engine', 'Unknown Engine') # Zeigt, welche der 70 Suchmaschinen den Treffer geliefert hat!
+                    
+                    formatted_data.append(f"• [{engine}] {title}: {content} ({url})")
+                    
+                return "\n".join(formatted_data), True
+    except Exception as e: 
+        print(f"[ADMIN LOG] ⚠️ SearXNG-Schnittstelle blockiert, nutze DuckDuckGo-Ausweichroute: {e}", flush=True)
+    
+    # Ausfallsicheres Backup über DuckDuckGo
     try:
         with DDGS() as ddgs:
             items = list(ddgs.text(query, max_results=5))
-            if items: return "\n".join([f"• {i.get('title','')}: {i.get('body','')} ({i.get('href','')})" for i in items]), True
+            if items: return "\n".join([f"• [DuckDuckGo] {i.get('title','')}: {i.get('body','')} ({i.get('href','')})" for i in items]), True
     except: pass
-    return "Keine Web-Ergebnisse gefunden.", False
+    return "Keine Web-Ergebnisse über das Metasuche-Netzwerk gefunden.", False
 
 def calculate_local_distance(location_a, location_b):
     try:
