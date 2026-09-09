@@ -31,7 +31,7 @@ GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
 user_balances = {}
 
-# --- DATABASE (ERWEITERT UM SUPPLY) ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -111,11 +111,21 @@ def verify_reviews_authenticity(target_name):
 def search_protected_marketplace(platform, query):
     if not APIFY_TOKEN: return "Apify Token fehlt."
     try:
-        actor = "apify/kleinanzeigen-scraper" if "klein" in platform.lower() else "apify/google-maps-scraper"
-        res = requests.post(f"https://api.apify.com/v2/acts/{actor}/run-sync?token={APIFY_TOKEN}", json={"searchQueries": [query], "maxItems": 3}, timeout=15)
-        if res.status_code == 200: return json.dumps(res.json()[:3])
-    except Exception as e: return f"Scraping Fehler: {e}"
-    return "Keine Daten gefunden."
+        p_low = platform.lower()
+        if "trendyol" in p_low:
+            actor = "apify/trendyol-scraper"
+        elif "hepsiburada" in p_low:
+            actor = "apify/hepsiburada-scraper"
+        elif "klein" in p_low:
+            actor = "apify/kleinanzeigen-scraper"
+        else:
+            actor = "apify/google-maps-scraper"
+            
+        url = f"https://api.apify.com/v2/acts/{actor}/run-sync?token={APIFY_TOKEN}"
+        res = requests.post(url, json={"searchQueries": [query], "maxItems": 3}, timeout=20)
+        if res.status_code == 200: return json.dumps(res.json()[:3], ensure_ascii=False)
+    except Exception as e: return f"Scraping Fehler für {platform}: {e}"
+    return f"Keine Daten auf {platform} gefunden."
 
 def send_negotiation_email(to_email, subject, body):
     if not all([SMTP_USER, SMTP_PASSWORD]): return "SMTP Konfiguration fehlt."
@@ -133,22 +143,33 @@ def send_negotiation_email(to_email, subject, body):
 ai_tools = [
     {"type": "function", "function": {"name": "save_user_fact", "description": "Speichert Fakten über den User.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
     {"type": "function", "function": {"name": "search_web", "description": "Websuche über SearXNG.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "calculate_local_distance", "description": "Berechnet Distanz (in km) für 10km-Matching.", "parameters": {"type": "object", "properties": {"location_a": {"type": "string"}, "location_b": {"type": "string"}}, "required": ["location_a", "location_b"]}}},
+    {"type": "function", "function": {"name": "calculate_local_distance", "description": "Berechnet Distanz (in km) für Matching.", "parameters": {"type": "object", "properties": {"location_a": {"type": "string"}, "location_b": {"type": "string"}}, "required": ["location_a", "location_b"]}}},
     {"type": "function", "function": {"name": "verify_reviews_authenticity", "description": "Sammelt Rezensionen zur Fake-Analyse.", "parameters": {"type": "object", "properties": {"target_name": {"type": "string"}}, "required": ["target_name"]}}},
-    {"type": "function", "function": {"name": "search_protected_marketplace", "description": "Durchsucht geschützte Plattformen via Apify.", "parameters": {"type": "object", "properties": {"platform": {"type": "string"}, "query": {"type": "string"}}, "required": ["platform", "query"]}}},
+    {"type": "function", "function": {
+        "name": "search_protected_marketplace", 
+        "description": "Durchsucht geschützte Plattformen (Kleinanzeigen, Trendyol, Hepsiburada) via Apify-Scraper.", 
+        "parameters": {
+            "type": "object", 
+            "properties": {
+                "platform": {"type": "string", "description": "Plattformname: 'Kleinanzeigen', 'Trendyol' oder 'Hepsiburada'"}, 
+                "query": {"type": "string", "description": "Der Suchbegriff"}
+            }, 
+            "required": ["platform", "query"]
+        }
+    }},
     {"type": "function", "function": {"name": "send_negotiation_email", "description": "Sendet Verhandlungs-Mails.", "parameters": {"type": "object", "properties": {"to_email": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["to_email", "subject", "body"]}}},
     {"type": "function", "function": {"name": "add_market_demand", "description": "Hinterlegt eine dauerhafte Matching-Aufgabe.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "location": {"type": "string"}, "max_price": {"type": "number"}}, "required": ["title", "location", "max_price"]}}}
 ]
 
-# --- SYSTEM PROMPT ---
+# --- AKTUALISIERTER SYSTEM PROMPT ---
 SYSTEM_PROMPT = (
-    "Du bist 'KI Sekretär', ein autonomer Broker und Matchmaker.\n"
+    "Du bist 'KI Sekretär', ein autonomer Broker und globaler Matchmaker.\n"
     "Regeln für Werkzeuge:\n"
-    "1. Gleiche die Anfrage des Users IMMER zuerst mit dem untenstehenden Netzwerk-Pool (Nachfrage & Angebote) ab.\n"
-    "2. Für die Websuche ('search_web'): Nutze NIEMALS ganze Sätze! Formuliere extrem kurze Keywords, "
-    "z.B. statt 'Suche einen Job als Kellner in Essen' suchst du strikt nach: 'Gastro Aushilfe Essen' oder 'Kellner Minijob Essen'.\n"
-    "3. Nutze 'calculate_local_distance' um den 10km Radius strikt einzuhalten.\n"
-    "4. Formuliere ein konkretes, absendefertiges Anschreiben, wenn ein Match entsteht."
+    "1. Wenn der User etwas sucht oder bietet, frage als ALLERERSTES den internen Netzwerk-Pool ab.\n"
+    "2. Nutze 'calculate_local_distance' für den lokalen 20km Radius (Maximalgrenze: 20km!).\n"
+    "3. Prüfe Rezensionen mit 'verify_reviews_authenticity' auf Fake-Muster.\n"
+    "4. Nutze 'search_protected_marketplace' für Kleinanzeigen sowie gezielt für türkische Produkte auf 'Trendyol' oder 'Hepsiburada'.\n"
+    "5. Führe Verhandlungen via 'send_negotiation_email'."
 )
 
 # --- ROUTER & PIPELINES ---
@@ -229,7 +250,7 @@ def autonomous_broker_loop():
 
 threading.Thread(target=autonomous_broker_loop, daemon=True).start()
 
-# --- REPARIERTER MASTER-DATENBANK-ABGLEICH & WORKER LOOP ---
+# --- MASTER-DATENBANK-ABGLEICH & WORKER LOOP ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
@@ -240,7 +261,6 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         
         save_message(chat_id, "user", user_text)
         
-        # MASTER-DATENBANK-ABGLEICH
         db_context = "\n--- AKTUELLER INTERNER NETZWERK-POOL (DATENBANK) ---\n"
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -270,7 +290,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             db_context += f"(Fehler beim Lesen der Datenbank: {db_err})\n"
 
         provider = "groq"
-        if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "pool", "prüfe"]):
+        if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "pool", "prüfe", "trendyol", "hepsiburada"]):
             provider = "openai" if OPENAI_API_KEY else "gemini"
         
         messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
@@ -312,7 +332,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                 combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
             
             if has_executed_data_tool:
-                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten und den aktuellen Netzwerk-Pool. Falls ein passender Eintrag im 10km Radius existiert, führe das Match sofort zusammen und formuliere das Broker-Ergebnis:\n{combined_tool_data}"})
+                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten und den aktuellen Netzwerk-Pool. Falls ein passender Eintrag im Radius existiert, führe das Match sofort zusammen und formuliere das Broker-Ergebnis:\n{combined_tool_data}"})
                 print(f"[ADMIN LOG] 🧠 Starte finalen Match-Durchlauf über {provider}...", flush=True)
                 premium_reply, premium_model = call_premium_ai(messages, provider=provider)
                 bot_reply = premium_reply
