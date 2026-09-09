@@ -12,7 +12,7 @@ from duckduckgo_search import DDGS
 app = Flask(__name__)
 
 # --- KONFIGURATION & API-SCHLÜSSEL ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
