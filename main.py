@@ -98,7 +98,7 @@ init_db()
 # --- HILFSFUNKTIONEN & TOOLS ---
 def search_web(query):
     try:
-        print(f"[ADMIN LOG] 🔍 KI startet Live-Websuche für: {query}", flush=True)
+        print(f"[ADMIN LOG] 🔍 Router / Live-Websuche gestartet für: {query}", flush=True)
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=3))
             if not results:
@@ -129,11 +129,11 @@ ai_tools = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Führt eine Live-Websuche im Internet durch, um aktuelle Nachrichten, Preise, Produkte oder Fakten zu finden.",
+            "description": "Führt eine Live-Websuche im Internet durch.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Der Suchbegriff für die Abfrage."}
+                    "query": {"type": "string", "description": "Der Suchbegriff für die Live-Abfrage."}
                 },
                 "required": ["query"]
             }
@@ -143,8 +143,7 @@ ai_tools = [
 
 SYSTEM_PROMPT = (
     "Du bist 'KI Sekretär', ein hochkompetenter, proaktiver KI-Assistent. "
-    "Nutze bei Fragen zu aktuellen Preisen, Produkten oder Fakten unbedingt das Websuch-Tool, "
-    "und formatiere die Antwort für den Nutzer übersichtlich, präzise und direkt (wie eine Top-Suchmaschine)."
+    "Nutze die bereitgestellten Websuchergebnisse als absolute Wahrheit und verlasse dich nicht auf veraltetes Trainingswissen."
 )
 
 def clean_think_tags(text):
@@ -155,14 +154,11 @@ def clean_think_tags(text):
     return text
 
 def format_reply_for_user(chat_id, text, model_name="", used_duckduckgo=False):
-    # FÜR DEN ADMIN: Zeigt das Modell und dass Groq DuckDuckGo verwendet hat (KEINE User-ID!)
     if str(chat_id) == ADMIN_USER_ID:
         admin_info = f"\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}"
         if used_duckduckgo:
-            admin_info += "\n🔍 Tool-Status: Groq hat DuckDuckGo erfolgreich eingesetzt."
+            admin_info += "\n🔍 Tool-Status: DuckDuckGo-Router erfolgreich eingesetzt."
         return f"{text}{admin_info}"
-    
-    # FÜR NORMALE USER: Völlig sauberer Text ohne jeden Hinweis
     return text
 
 def send_telegram_message(chat_id, text, model_name="", used_duckduckgo=False):
@@ -229,29 +225,43 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(profile, ensure_ascii=False)}"}] + history
 
         used_duckduckgo = False
+        tool_calls = None
+
         if image_bytes:
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
-            tool_calls = None
         else:
-            bot_reply, used_model_name, tool_calls = call_groq_text(messages)
-
-        if tool_calls:
-            for tc in tool_calls:
-                func_name = tc.function.name
-                args = json.loads(tc.function.arguments)
+            # --- SMART ROUTER / ERZWUNGENER WECH ---
+            # Wenn der User nach Preisen, Modellen oder S26/S27/Geräten fragt, triggern wir die Suche direkt vorab!
+            lower_text = user_text.lower()
+            if any(keyword in lower_text for keyword in ["samsung", "s26", "s27", "preis", "ultra", "kaufen", "gibt es", "suche"]):
+                print(f"[ADMIN LOG] ⚡ Smart Router greift: Erzwinge Websuche für '{user_text}'", flush=True)
+                search_result, used_duckduckgo = search_web(user_text)
                 
-                if func_name == "save_user_fact":
-                    save_user_fact(chat_id, args.get("key"), args.get("value"))
-                    bot_reply = f"Habe mir gemerkt: {args.get('key')} = {args.get('value')}"
+                # Wir füttern das Modell direkt mit dem echten Suchergebnis
+                messages.append({"role": "user", "content": user_text})
+                messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": "forced_router", "type": "function", "function": {"name": "search_web", "arguments": json.dumps({"query": user_text})}}]})
+                messages.append({"role": "tool", "tool_call_id": "forced_router", "content": search_result})
                 
-                elif func_name == "search_web":
-                    search_result, used_duckduckgo = search_web(args.get("query"))
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": search_result})
-                    bot_reply, used_model_name, _ = call_groq_text(messages)
+                bot_reply, used_model_name, _ = call_groq_text(messages)
+            else:
+                # Normaler Weg via Groq-Textmodell
+                bot_reply, used_model_name, tool_calls = call_groq_text(messages)
+                
+                if tool_calls:
+                    for tc in tool_calls:
+                        func_name = tc.function.name
+                        args = json.loads(tc.function.arguments)
+                        if func_name == "save_user_fact":
+                            save_user_fact(chat_id, args.get("key"), args.get("value"))
+                            bot_reply = f"Habe mir gemerkt: {args.get('key')} = {args.get('value')}"
+                        elif func_name == "search_web":
+                            search_result, used_duckduckgo = search_web(args.get("query"))
+                            messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
+                            messages.append({"role": "tool", "tool_call_id": tc.id, "content": search_result})
+                            bot_reply, used_model_name, _ = call_groq_text(messages)
 
         if not bot_reply:
-            bot_reply = "Hier sind die aktuellen Suchergebnisse für deine Anfrage."
+            bot_reply = "Hier sind die aktuellen Informationen dazu."
             
         save_message(chat_id, "assistant", bot_reply)
 
