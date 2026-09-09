@@ -1,83 +1,58 @@
 # main.py
-"""
-KI Sekretär - Autonomer KI-Entwickler-Broker
 
-Dieses Modul enthält die Kernfunktionen des Bots, darunter die
-"Echtheits‑Detektiv"‑ und "Premium‑Verhandlung"‑Routinen.
-Für den Administrator (ID: 8874543115) wird zusätzlich eine
-Admin‑Signatur mit dem genauen KI‑Modell angezeigt.
-"""
+# This module provides functionalities for the KI Sekretär bot.
+# Functions include authenticity detection (Echtheits-Detektiv) and premium negotiation (Premium-Verhandlung).
 
-import os
-from typing import Any, Dict
-
-# ---------------------------------------------------------------------------
-# Hilfsfunktion: prüft, ob der Aufrufer Administrator ist
-# ---------------------------------------------------------------------------
 ADMIN_ID = "8874543115"
+ADMIN_SIGNATURE = "--- [ADMIN] --- 🤖 GPT-4"
 
-def is_admin(user_id: str) -> bool:
-    """Return True if the given user_id matches the configured admin ID."""
-    return str(user_id) == ADMIN_ID
+def _admin_suffix(user_id: str) -> str:
+    """Return the admin signature if the user is the administrator.
 
-# ---------------------------------------------------------------------------
-# Funktion: Echtheits‑Detektiv
-# ---------------------------------------------------------------------------
-def echtheits_detektiv(request: Dict[str, Any]) -> str:
-    """Analysiere einen Text und gib ein Ergebnis zurück.
+    Args:
+        user_id: The ID of the user as a string.
 
-    Für den Administrator wird zusätzlich die Modell‑Version angezeigt.
+    Returns:
+        A string containing the admin signature or an empty string.
     """
-    user_id = request.get("user_id", "")
-    text = request.get("text", "")
+    if str(user_id) == ADMIN_ID:
+        return f"\n{ADMIN_SIGNATURE}"
+    return ""
 
-    # --- Hier kommt die eigentliche Logik des Detektivs ---
-    # (Platzhalter‑Implementierung)
-    if not text:
-        result = "Bitte gib einen Text zum Prüfen an."
-    else:
-        # Beispiel‑Analyse (kann durch echte KI‑Logik ersetzt werden)
-        result = f"Der Text scheint authentisch zu sein. Analyse‑Score: 92%"
 
-    # Admin‑Signatur hinzufügen, falls nötig
-    if is_admin(user_id):
-        # Das genaue Modell kann dynamisch ermittelt werden; hier fest codiert.
-        model_info = "gpt-4o-mini"
-        result += f"\n--- [ADMIN] --- 🤖 Modell: {model_info}"
+def echtheits_detektiv(user_id: str, item_description: str) -> str:
+    """Echtheits-Detektiv: Checks the authenticity of a given item description.
 
-    return result
+    Args:
+        user_id: The ID of the user requesting the check.
+        item_description: A textual description of the item to be verified.
 
-# ---------------------------------------------------------------------------
-# Funktion: Premium‑Verhandlung
-# ---------------------------------------------------------------------------
-def premium_verhandlung(request: Dict[str, Any]) -> str:
-    """Führe eine Premium‑Verhandlung mit dem Nutzer.
-
-    Für den Administrator wird zusätzlich die Modell‑Version angezeigt.
+    Returns:
+        A response string indicating the result of the authenticity check.
     """
-    user_id = request.get("user_id", "")
-    topic = request.get("topic", "Allgemein")
+    # Placeholder logic for authenticity detection.
+    # In a real implementation this would call an external service or run a model.
+    result = f"Die Echtheit des folgenden Artikels wurde geprüft: {item_description}.\nErgebnis: Wahrscheinlich echt."
+    return result + _admin_suffix(user_id)
 
-    # --- Hier kommt die eigentliche Verhandlungslogik ---
-    # (Platzhalter‑Implementierung)
-    result = f"Premium‑Verhandlung zum Thema '{topic}' gestartet."
-    result += "\nWir prüfen die besten Konditionen für dich."
 
-    # Admin‑Signatur hinzufügen, falls nötig
-    if is_admin(user_id):
-        model_info = "gpt-4o-mini"
-        result += f"\n--- [ADMIN] --- 🤖 Modell: {model_info}"
+def premium_verhandlung(user_id: str, negotiation_topic: str) -> str:
+    """Premium-Verhandlung: Handles a premium negotiation on a given topic.
 
-    return result
+    Args:
+        user_id: The ID of the user initiating the negotiation.
+        negotiation_topic: The subject of the negotiation.
 
-# ---------------------------------------------------------------------------
-# Beispiel‑Aufruf (nur für lokale Tests)
-# ---------------------------------------------------------------------------
+    Returns:
+        A response string with negotiation details.
+    """
+    # Placeholder negotiation logic.
+    response = f"Premium-Verhandlung gestartet zum Thema: {negotiation_topic}.\nWir bieten Ihnen exklusive Konditionen an."
+    return response + _admin_suffix(user_id)
+
+# Example usage (would be removed or guarded in production)
 if __name__ == "__main__":
-    # Simuliere einen normalen Nutzer
-    print(echtheits_detektiv({"user_id": "123456", "text": "Beispieltext"}))
-    print()
-    # Simuliere den Administrator
-    print(echtheits_detektiv({"user_id": "8874543115", "text": "Beispieltext"}))
-    print()
-    print(premium_verhandlung({"user_id": "8874543115", "topic": "Vertrag"}))
+    # Simulate a normal user request
+    print(echtheits_detektiv("1234567890", "Original Apple iPhone 13"))
+    # Simulate an admin request
+    print(premium_verhandlung(ADMIN_ID, "Vertragsverlängerung"))
