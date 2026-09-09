@@ -31,13 +31,14 @@ GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
 user_balances = {}
 
-# --- DATABASE ---
+# --- DATABASE (ERWEITERT UM SUPPLY) ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     cursor.execute('CREATE TABLE IF NOT EXISTS user_profile (user_id TEXT, fact_key TEXT, fact_value TEXT, PRIMARY KEY (user_id, fact_key))')
     cursor.execute('CREATE TABLE IF NOT EXISTS marketplace_demand (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, title TEXT, location TEXT, max_price REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS marketplace_supply (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, location TEXT, price REAL, contact TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     conn.commit()
     conn.close()
 
@@ -74,7 +75,7 @@ def add_market_demand(user_id, title, location, max_price):
     conn.cursor().execute('INSERT INTO marketplace_demand (user_id, title, location, max_price) VALUES (?, ?, ?, ?)', (str(user_id), title, location, float(max_price)))
     conn.commit()
     conn.close()
-    return "Suchauftrag erfolgreich hinterlegt! Ich scanne den Markt nun alle 30 Minuten autonom."
+    return "Suchauftrag erfolgreich hinterlegt! Ich scanne den Markt nun autonom nach passenden Angeboten."
 
 init_db()
 
@@ -139,11 +140,11 @@ ai_tools = [
     {"type": "function", "function": {"name": "add_market_demand", "description": "Hinterlegt eine dauerhafte Matching-Aufgabe.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "location": {"type": "string"}, "max_price": {"type": "number"}}, "required": ["title", "location", "max_price"]}}}
 ]
 
-# --- OPTIMIERTER SYSTEM PROMPT ---
+# --- SYSTEM PROMPT ---
 SYSTEM_PROMPT = (
     "Du bist 'KI Sekretär', ein autonomer Broker und Matchmaker.\n"
     "Regeln für Werkzeuge:\n"
-    "1. Wenn der User etwas sucht oder bietet, frage als ALLERERSTES die interne Datenbank ab.\n"
+    "1. Gleiche die Anfrage des Users IMMER zuerst mit dem untenstehenden Netzwerk-Pool (Nachfrage & Angebote) ab.\n"
     "2. Für die Websuche ('search_web'): Nutze NIEMALS ganze Sätze! Formuliere extrem kurze Keywords, "
     "z.B. statt 'Suche einen Job als Kellner in Essen' suchst du strikt nach: 'Gastro Aushilfe Essen' oder 'Kellner Minijob Essen'.\n"
     "3. Nutze 'calculate_local_distance' um den 10km Radius strikt einzuhalten.\n"
@@ -228,7 +229,7 @@ def autonomous_broker_loop():
 
 threading.Thread(target=autonomous_broker_loop, daemon=True).start()
 
-# --- REPARIERTER WORKER LOOP (DATENBANK-ABGLEICH & FIX) ---
+# --- REPARIERTER MASTER-DATENBANK-ABGLEICH & WORKER LOOP ---
 def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
     try:
         if chat_id not in user_balances: user_balances[chat_id] = INITIAL_BALANCE
@@ -239,18 +240,38 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         
         save_message(chat_id, "user", user_text)
         
-        # Interne Datenbank abfragen für den Matching Pool
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand")
-        all_demands = cursor.fetchall()
-        conn.close()
-        
-        db_context = "\n--- INTERNE DATENBANK EINTRÄGE (MATCHING POOL) ---\n"
-        for uid, t, l, p in all_demands:
-            db_context += f"- User {uid} sucht/bietet: '{t}' in '{l}' (Limit: {p}€)\n"
+        # MASTER-DATENBANK-ABGLEICH
+        db_context = "\n--- AKTUELLER INTERNER NETZWERK-POOL (DATENBANK) ---\n"
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT user_id, title, location, max_price FROM marketplace_demand")
+            all_demands = cursor.fetchall()
+            
+            cursor.execute("SELECT title, location, price, contact FROM marketplace_supply")
+            all_supplies = cursor.fetchall()
+            conn.close()
+            
+            if all_demands:
+                db_context += "\n[SUCHEN / NACHFRAGE]:\n"
+                for uid, t, l, p in all_demands:
+                    db_context += f"- User {uid} sucht: '{t}' in '{l}' (Limit/Budget: {p}€)\n"
+            
+            if all_supplies:
+                db_context += "\n[ANGEBOTE / SUPPLY]:\n"
+                for t, l, p, c in all_supplies:
+                    db_context += f"- Angebot: '{t}' in '{l}' (Preis/Lohn: {p}€) | Kontakt: {c}\n"
+                    
+            if not all_demands and not all_supplies:
+                db_context += "(Die interne Datenbank ist aktuell komplett leer.)\n"
+                
+        except Exception as db_err:
+            db_context += f"(Fehler beim Lesen der Datenbank: {db_err})\n"
 
-        provider = "openai" if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "bestelle"]) and OPENAI_API_KEY else ("gemini" if GEMINI_API_KEY else "groq")
+        provider = "groq"
+        if any(k in user_text.lower() for k in ["verhandle", "kaufen", "preis drücken", "match", "pool", "prüfe"]):
+            provider = "openai" if OPENAI_API_KEY else "gemini"
         
         messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n{db_context}\nProfil: {json.dumps(get_user_profile(chat_id))}"}] + get_history(chat_id)
         messages.append({"role": "user", "content": user_text})
@@ -291,14 +312,14 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                 combined_tool_data += f"\n[Werkzeug {fn}]: {res}"
             
             if has_executed_data_tool:
-                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten und den aktuellen Datenbank-Pool. Falls ein passender Eintrag im 10km Radius existiert (z.B. Suche und Biete stimmen überein), führe das Match sofort zusammen und formuliere das Broker-Ergebnis:\n{combined_tool_data}"})
+                messages.append({"role": "user", "content": f"Verarbeite diese soeben ermittelten Live-Daten und den aktuellen Netzwerk-Pool. Falls ein passender Eintrag im 10km Radius existiert, führe das Match sofort zusammen und formuliere das Broker-Ergebnis:\n{combined_tool_data}"})
                 print(f"[ADMIN LOG] 🧠 Starte finalen Match-Durchlauf über {provider}...", flush=True)
                 premium_reply, premium_model = call_premium_ai(messages, provider=provider)
                 bot_reply = premium_reply
                 used_model = premium_model
                     
         if not bot_reply or "auswertbaren daten" in bot_reply.lower():
-            bot_reply = "Ich habe die Netzwerkanalyse durchgeführt. Aktuell liegt kein direktes Match vor. Ich habe Ihre Suche im System hinterlegt und informiere Sie autonom, sobald ein passender Partner im Umkreis postet."
+            bot_reply = "Ich habe das Netzwerk analysiert. Aktuell liegt kein direktes Match vor. Ich habe Ihre Anfrage im System hinterlegt und informiere Sie autonom, sobald ein passender Partner im Umkreis postet."
 
         save_message(chat_id, "assistant", bot_reply)
         
