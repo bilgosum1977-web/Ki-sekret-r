@@ -9,7 +9,6 @@ import requests
 from PIL import Image
 from duckduckgo_search import DDGS
 
-
 app = Flask(__name__)
 
 # --- KONFIGURATION & API-SCHLÜSSEL ---
@@ -27,7 +26,6 @@ if GROQ_API_KEY:
 else:
     print("[ADMIN LOG] ❌ KRITISCH: Kein Groq API Key gefunden!", flush=True)
 
-# Das OpenAI-kompatible Modell auf Groq
 GROQ_TEXT_MODEL = "openai/gpt-oss-20b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
@@ -104,20 +102,19 @@ def search_web(query):
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=3))
             if not results:
-                return "Keine aktuellen Web-Ergebnisse gefunden.", []
-            formatted_results = "\n".join([f"• {item.get('title', '')}: {item.get('body', '')}" for item in results])
-            sources = [item.get('href', item.get('title', 'Web')) for item in results]
-            return formatted_results, sources
+                return "Keine aktuellen Web-Ergebnisse gefunden.", False
+            formatted_results = "\n".join([f"• {item.get('title', '')}: {item.get('body', '')} (Quelle: {item.get('href', '')})" for item in results])
+            return formatted_results, True
     except Exception as e:
         print(f"[ADMIN LOG] ⚠️ Web Search Fehler: {e}", flush=True)
-        return "Websuche derzeit nicht erreichbar.", []
+        return "Websuche derzeit nicht erreichbar.", False
 
 ai_tools = [
     {
         "type": "function",
         "function": {
             "name": "save_user_fact",
-            "description": "Speichert oder aktualisiert einen wichtigen Fakt oder eine Vorliebe über den User (z.B. Wohnort, Hobbys, Projekte).",
+            "description": "Speichert oder aktualisiert einen wichtigen Fakt über den User.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -132,7 +129,7 @@ ai_tools = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Führt eine Live-Websuche im Internet durch, um aktuelle Nachrichten, Preise, Daten oder Fakten zu finden.",
+            "description": "Führt eine Live-Websuche im Internet durch, um aktuelle Nachrichten, Preise, Produkte oder Fakten zu finden.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -146,7 +143,8 @@ ai_tools = [
 
 SYSTEM_PROMPT = (
     "Du bist 'KI Sekretär', ein hochkompetenter, proaktiver KI-Assistent. "
-    "Erinnere dich exakt an den Kontext und nutze bei Bedarf aktiv das Websuch-Tool, um aktuelle Fragen des Nutzers zu beantworten."
+    "Nutze bei Fragen zu aktuellen Preisen, Produkten oder Fakten unbedingt das Websuch-Tool, "
+    "und formatiere die Antwort für den Nutzer übersichtlich, präzise und direkt (wie eine Top-Suchmaschine)."
 )
 
 def clean_think_tags(text):
@@ -156,18 +154,20 @@ def clean_think_tags(text):
         return text.split("</think>")[-1].strip()
     return text
 
-def format_reply_for_user(chat_id, text, model_name="", sources=None):
-    """Fügt Admin-Details (Wer spricht, Modell, Quellen) hinzu, wenn der Admin schreibt. Normaler User sieht nichts."""
+def format_reply_for_user(chat_id, text, model_name="", used_duckduckgo=False):
+    # FÜR DEN ADMIN: Zeigt das Modell und dass Groq DuckDuckGo verwendet hat (KEINE User-ID!)
     if str(chat_id) == ADMIN_USER_ID:
-        admin_info = f"\n\n--- [ADMIN INFO] ---\n👤 User-ID: {chat_id}\n🤖 Modell: {model_name}"
-        if sources:
-            admin_info += f"\n🌐 Quellen: {', '.join(sources)}"
+        admin_info = f"\n\n--- [ADMIN INFO] ---\n🤖 Modell: {model_name}"
+        if used_duckduckgo:
+            admin_info += "\n🔍 Tool-Status: Groq hat DuckDuckGo erfolgreich eingesetzt."
         return f"{text}{admin_info}"
+    
+    # FÜR NORMALE USER: Völlig sauberer Text ohne jeden Hinweis
     return text
 
-def send_telegram_message(chat_id, text, model_name="", sources=None):
+def send_telegram_message(chat_id, text, model_name="", used_duckduckgo=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    final_text = format_reply_for_user(chat_id, text, model_name, sources)
+    final_text = format_reply_for_user(chat_id, text, model_name, used_duckduckgo)
     try:
         response = requests.post(url, json={"chat_id": chat_id, "text": final_text}, timeout=5)
         res_json = response.json()
@@ -177,9 +177,9 @@ def send_telegram_message(chat_id, text, model_name="", sources=None):
         print(f"Fehler beim Telegram-Senden: {e}")
     return None
 
-def edit_telegram_message(chat_id, message_id, text, model_name="", sources=None):
+def edit_telegram_message(chat_id, message_id, text, model_name="", used_duckduckgo=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    final_text = format_reply_for_user(chat_id, text, model_name, sources)
+    final_text = format_reply_for_user(chat_id, text, model_name, used_duckduckgo)
     try:
         requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": final_text}, timeout=5)
     except Exception as e:
@@ -200,10 +200,11 @@ def call_groq_text(messages_list):
             model=GROQ_TEXT_MODEL, messages=messages_list, tools=ai_tools, tool_choice="auto", temperature=0.7, max_tokens=1024
         )
         msg = response.choices[0].message
-        return clean_think_tags(msg.content or ""), f"Groq ({GROQ_TEXT_MODEL})", msg.tool_calls
+        content = clean_think_tags(msg.content or "")
+        return content, f"Groq ({GROQ_TEXT_MODEL})", getattr(msg, 'tool_calls', None)
     except Exception as e:
         print(f"Groq Fehler: {e}", flush=True)
-        return "Technischer Fehler aufgetreten.", "Groq (Fehler)", None
+        return "", "Groq (Fehler)", None
 
 def call_groq_vision(user_text, image_bytes):
     try:
@@ -227,7 +228,7 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
         history = get_history(chat_id, limit=MAX_HISTORY_LENGTH)
         messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\nProfil: {json.dumps(profile, ensure_ascii=False)}"}] + history
 
-        used_sources = []
+        used_duckduckgo = False
         if image_bytes:
             bot_reply, used_model_name = call_groq_vision(user_text, image_bytes)
             tool_calls = None
@@ -244,18 +245,20 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                     bot_reply = f"Habe mir gemerkt: {args.get('key')} = {args.get('value')}"
                 
                 elif func_name == "search_web":
-                    search_result, used_sources = search_web(args.get("query"))
+                    search_result, used_duckduckgo = search_web(args.get("query"))
                     messages.append({"role": "assistant", "content": None, "tool_calls": [tc]})
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": search_result})
                     bot_reply, used_model_name, _ = call_groq_text(messages)
 
-        bot_reply = bot_reply or "Es ist ein unerwarteter Fehler aufgetreten."
+        if not bot_reply:
+            bot_reply = "Hier sind die aktuellen Suchergebnisse für deine Anfrage."
+            
         save_message(chat_id, "assistant", bot_reply)
 
         if loading_msg_id:
-            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name, sources=used_sources)
+            edit_telegram_message(chat_id, loading_msg_id, bot_reply, model_name=used_model_name, used_duckduckgo=used_duckduckgo)
         else:
-            send_telegram_message(chat_id, bot_reply, model_name=used_model_name, sources=used_sources)
+            send_telegram_message(chat_id, bot_reply, model_name=used_model_name, used_duckduckgo=used_duckduckgo)
     except Exception as e:
         print(f"Worker Fehler: {e}", flush=True)
 
@@ -274,7 +277,7 @@ def webhook():
         if not user_text and image_bytes: user_text = "Was ist auf diesem Bild?"
         if not user_text and not image_bytes: return "OK", 200
 
-        loading_msg_id = send_telegram_message(chat_id, "Analysiere..." if image_bytes else "Verarbeite...")
+        loading_msg_id = send_telegram_message(chat_id, "Suche im Web..." if not image_bytes else "Analysiere...")
         executor.submit(process_message_async, chat_id, user_text, image_bytes, loading_msg_id)
     except Exception as e:
         print(f"Webhook Fehler: {e}", flush=True)
