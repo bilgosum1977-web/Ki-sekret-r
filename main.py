@@ -209,12 +209,16 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
             if any(keyword in user_text.lower() for keyword in ["verhandle", "kaufen", "vertrag", "preis drücken", "match", "bestelle"]):
                 provider = "openai" if OPENAI_API_KEY else "gemini"
             
+            # Erster Durchlauf holt eventuelle Tool-Calls ab
             content, used_model_name, tool_calls = call_groq_text(messages)
             bot_reply = content
 
             if tool_calls:
-                # 1. Dem Verlauf mitteilen, dass die KI Tools aufrufen wollte (Pflicht für API)
+                # Dem Verlauf mitteilen, dass die KI Tools nutzen möchte (API Pflicht)
                 messages.append({"role": "assistant", "content": None, "tool_calls": [tc for tc in tool_calls]})
+                
+                # Ein Flag, um zu prüfen, ob wir Internet/Geografie-Tools genutzt haben
+                has_executed_data_tool = False
                 
                 for tc in tool_calls:
                     func_name = tc.function.name
@@ -227,26 +231,36 @@ def process_message_async(chat_id, user_text, image_bytes, loading_msg_id):
                         tool_result = f"Fakt gespeichert: {args.get('key')} = {args.get('value')}"
                     elif func_name == "search_web":
                         tool_result, _ = search_web(args.get("query"))
+                        has_executed_data_tool = True
                     elif func_name == "calculate_local_distance":
                         tool_result = calculate_local_distance(args.get("location_a"), args.get("location_b"))
+                        has_executed_data_tool = True
                     elif func_name == "verify_reviews_authenticity":
                         tool_result = verify_reviews_authenticity(args.get("target_name"))
+                        has_executed_data_tool = True
                     elif func_name == "search_protected_marketplace":
                         tool_result = search_protected_marketplace(args.get("platform"), args.get("query"))
+                        has_executed_data_tool = True
                     elif func_name == "send_negotiation_email":
                         tool_result = send_negotiation_email(args.get("to_email"), args.get("subject"), args.get("body"))
+                        has_executed_data_tool = True
                     elif func_name == "add_market_demand":
                         tool_result = add_market_demand(chat_id, args.get("title"), args.get("location"), args.get("max_price"))
+                        bot_reply = tool_result # Für reine DB-Einträge reicht die Bestätigung
 
-                    # Das Ergebnis des Tools in den Verlauf legen
-                    messages.append({"role": "tool", "content": str(tool_result), "tool_call_id": tc.id})
+                    # WICHTIG: Das Tool-Ergebnis in die Historie legen
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(tool_result)})
                 
-                # 🚀 REPARATUR: Jetzt fragen wir die Premium-KI mit allen gesammelten Daten ab!
-                print(f"[ADMIN LOG] 🧠 Starte finalen Broker-Durchlauf über {provider}...", flush=True)
-                bot_reply, used_model_name = call_premium_ai(messages, provider=provider)
+                # Nur wenn echte Daten-Tools ausgeführt wurden, rufen wir die Premium-KI für das Fazit an
+                if has_executed_data_tool:
+                    print(f"[ADMIN LOG] 🧠 Starte finalen Broker-Durchlauf über {provider}...", flush=True)
+                    premium_reply, premium_model = call_premium_ai(messages, provider=provider)
+                    bot_reply = premium_reply
+                    used_model_name = premium_model
 
-        if not bot_reply:
-            bot_reply = "Aktion erfolgreich ausgeführt."
+            # Sicherheits-Fallback, falls wirklich gar kein Text generiert wurde
+            if not bot_reply:
+                bot_reply = "Suche beendet, aber keine auswertbaren Daten vom Modell empfangen."
 
         save_message(chat_id, "assistant", bot_reply)
 
