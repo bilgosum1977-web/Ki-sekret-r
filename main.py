@@ -264,16 +264,25 @@ def search_ddgs(query: str):
         return None
 
 
-# --- DISPATCHER – PRODUKT-PRIORISIERT (DEIN ORIGINAL) ---
+###############################################
+# DISPATCHER – PRODUKT-PRIORISIERT (SCHLÜSSELFERTIG)
+###############################################
+
 def is_product_query(query: str) -> bool:
+    """
+    Sehr einfache Produkt-Erkennung.
+    Du kannst später erweitern (LLM, Regex, Kategorien).
+    """
     product_keywords = [
         "kaufen", "preis", "kosten", "produkt", "angebot",
         "airpods", "iphone", "samsung", "dyson", "ps5",
         "headset", "kopfhörer", "monitor", "tv", "fernseher",
-        "google shopping", "amazon", "ebay", "suche", "suche nach"
+        "google shopping", "amazon", "ebay"
     ]
+
     q = query.lower()
     return any(k in q for k in product_keywords)
+
 
 def dispatcher(query: str, user_id: str):
     user_level = get_user_level(user_id)
@@ -281,17 +290,19 @@ def dispatcher(query: str, user_id: str):
     ########################################################
     # 1) PRODUKTANFRAGE? → APIFY ZUERST
     ########################################################
+
     if is_product_query(query):
+
         # Apify-Priorität
         for src in ["apify_amazon", "apify_google_shopping", "apify_ebay"]:
+
             apify_data, apify_cost_usd = run_apify(src, query)
-            
+            apify_cost_eur = round(apify_cost_usd, 4)
+            final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
+
             items = apify_data.get("items", [])
             if not items:
                 continue
-
-            apify_cost_eur = round(apify_cost_usd, 4)
-            final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
 
             # Free-User → Zustimmung nötig
             if user_level == "free":
@@ -325,9 +336,13 @@ def dispatcher(query: str, user_id: str):
                 ),
             }
 
+        # Falls Apify nichts liefert → Free-Layer nutzen
+        # Weiter unten kommt Free-Layer automatisch
+
     ########################################################
     # 2) FREE-LAYER (SearXNG + DDGS)
     ########################################################
+
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
 
@@ -348,9 +363,10 @@ def dispatcher(query: str, user_id: str):
     ########################################################
     # 3) FALLBACK
     ########################################################
+
     return {
         "status": "error",
-        "message": "Es konnten keine passenden Ergebnisse gefunden werden."
+        "message": "Keine Quelle lieferte Ergebnisse."
     }
 
 
@@ -375,7 +391,7 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."})
             return
 
-        # Abfrage über den originalen Dispatcher leiten
+        # Abfrage über den Dispatcher leiten
         dispatch_res = dispatcher(user_text, chat_id)
         bot_reply = dispatch_res.get("message", "Keine Daten gefunden.")
 
