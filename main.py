@@ -168,8 +168,8 @@ ai_tools = [
 def duckduckgo_fallback(keyword: str):
     items = []
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(f"{keyword} kaufen preis produkt", max_results=5))
+        with DDGS(timeout=5) as ddgs:
+            results = list(ddgs.text(f"{keyword} preis kaufen", max_results=5))
             for r in results:
                 title = r.get("title", "")
                 body = r.get("body", "")
@@ -191,25 +191,27 @@ def duckduckgo_fallback(keyword: str):
                     "seller": "unbekannt",
                     "url": url
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"DuckDuckGo Fallback Fehler: {e}")
     return items
 
 def fetch_live_marketplace_data(keyword: str, platform_filter: str, user_location: str, max_radius_km: float):
     params = {
-        "q": f"{keyword} kaufen preis produkt",
+        "q": f"{keyword} preis kaufen",
         "categories": "shopping",
         "format": "json",
         "engines": "amazon,ebay,shopping"
     }
 
+    results = []
     try:
         active_url = SEARXNG_URL if "localhost" not in SEARXNG_URL else "https://searx.be"
-        r = requests.get(active_url, params=params, timeout=10)
-        data = r.json()
-        results = data.get("results", [])
+        r = requests.get(active_url, params=params, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            results = data.get("results", [])
     except Exception:
-        results = []
+        pass
 
     if not results:
         results = duckduckgo_fallback(keyword)
@@ -362,12 +364,16 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply, "parse_mode": "Markdown"})
             return
 
-        clean_keyword = user_text
+        clean_keyword = u_low
+        filler_words = ["suche", "neueste", "neuer", "neues", "kaufen", "preis", "angebot", "deal", "produkt", "modell", "bitte", "mal"]
+        for kw in filler_words:
+            clean_keyword = clean_keyword.replace(kw, "")
         for kw in shopping_intents + compare_intents + analysis_intents:
             clean_keyword = clean_keyword.replace(kw, "")
+            
         clean_keyword = clean_keyword.strip()
         if not clean_keyword:
-            clean_keyword = "produkt"
+            clean_keyword = "airpods"
 
         save_demand(chat_id, clean_keyword, "Gelsenkirchen", 150.0)
 
