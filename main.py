@@ -15,10 +15,10 @@ ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_KEY")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
 
-# Zwingendes Sicherheits-Präfix für Code-Änderungen und Befehle
+# Zwingendes Sicherheits-Präfix für Code-Freigaben und Admin-Befehle
 REQUIRED_PREFIX = "+×÷edi99"
 
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -33,6 +33,9 @@ GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
 user_live_searches = {}
+
+# Speicher für ausstehende Code-Änderungen (Vorschau / Freigabe)
+pending_code_updates = {}
 
 # --- DATABASE ---
 def init_db():
@@ -64,14 +67,45 @@ def has_required_prefix(message: str) -> bool:
         return False
     return message.strip().startswith(REQUIRED_PREFIX)
 
-# --- GITHUB UPDATE TOOL ---
-def update_github_code(file_path, new_content, commit_message, original_message=""):
-    """Aktualisiert oder erstellt eine Datei im GitHub-Repository nach erfolgreicher Präfix-Prüfung."""
-    if not has_required_prefix(original_message):
-        return f"❌ Sicherheitsfehler: Code-Änderungen und GitHub-Commits erfordern zwingend das Präfix '{REQUIRED_PREFIX}' am Anfang der Nachricht."
+# --- GITHUB UPDATE TOOL (SICHERER VORSCHAU-MODUS) ---
+def update_github_code(file_path, new_content, commit_message, chat_id):
+    """
+    Speichert die Änderung im Zwischenspeicher und gibt dem Benutzer eine Vorschau.
+    Führt den eigentlichen Upload ERST DANN aus, wenn der Nutzer mit dem Präfix zustimmt.
+    """
+    pending_code_updates[chat_id] = {
+        "file_path": file_path,
+        "new_content": new_content,
+        "commit_message": commit_message
+    }
+    
+    preview_snippet = new_content[:500] + ("\n... [Code ist länger, Rest wird im Commit übernommen] ..." if len(new_content) > 500 else "")
+    
+    return (
+        f"🛡️ **SICHERHEITS-KONTROLLE (VORSCHAU)**\n\n"
+        f"Ich habe deine Code-Anfrage vorbereitet, aber **noch nichts** auf GitHub geändert, um ein Zerstören des Codes zu verhindern.\n\n"
+        f"📁 **Datei:** `{file_path}`\n"
+        f"💬 **Commit-Nachricht:** `{commit_message}`\n\n"
+        f"📜 **Vorschau des neuen Codes:**\n```python\n{preview_snippet}\n```\n\n"
+        f"👉 **Was möchtest du tun?**\n"
+        f"Antworte mit **`{REQUIRED_PREFIX} ja`**, damit ich diesen Code jetzt auf GitHub hochlade. "
+        f"Antworte mit etwas anderem, um den Vorgang abzubrechen."
+    )
+
+def execute_final_github_update(chat_id):
+    """Führt den echten GitHub-Upload aus, nachdem der Benutzer zugestimmt hat."""
+    update_data = pending_code_updates.get(chat_id)
+    if not update_data:
+        return "❌ Es liegt keine ausstehende Code-Änderung vor, die freigegeben werden könnte."
+    
+    file_path = update_data["file_path"]
+    new_content = update_data["new_content"]
+    commit_message = update_data["commit_message"]
+    
+    del pending_code_updates[chat_id]
 
     token = os.getenv("GITHUB_TOKEN")
-    repo = os.getenv("GITHUB_REPO") # Format: "bilgosum1977-web/Ki-sekret-r"
+    repo = os.getenv("GITHUB_REPO")
     
     if not token or not repo:
         return "Fehler: GITHUB_TOKEN oder GITHUB_REPO sind auf Render nicht gesetzt."
@@ -101,19 +135,18 @@ def update_github_code(file_path, new_content, commit_message, original_message=
         put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
         
         if put_res.status_code in [200, 201]:
-            return f"✅ Erfolgreich! Die Datei {file_path} wurde auf GitHub aktualisiert. Render baut den Bot in wenigen Sekunden neu auf!"
+            return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde sicher auf GitHub aktualisiert. Render baut den Bot in wenigen Sekunden neu auf!"
         else:
             return f"GitHub API Fehler ({put_res.status_code}): {put_res.text[:200]}"
     except Exception as e:
         return f"Fehler beim GitHub-Update: {str(e)}"
 
-# AI Tools Schema für die KI-Schnittstelle
 ai_tools = [
     {
         "type": "function",
         "function": {
             "name": "update_github_code",
-            "description": "Aktualisiert den Quellcode des Bots auf GitHub (z.B. main.py), um neue Funktionen hinzuzufügen oder Code anzupassen.",
+            "description": "Erstellt eine Code-Vorschau für GitHub, die erst nach Bestätigung durch den Benutzer hochgeladen wird.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -275,27 +308,33 @@ def process_message_async(chat_id, user_text, loading_msg_id):
         
         url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
 
+        # 0. SONDERTOPIC: Prüfen, ob der Nutzer eine ausstehende Code-Änderung freigeben will
+        if chat_id in pending_code_updates:
+            if has_required_prefix(user_text) and ("ja" in u_low or "ok" in u_low or "bestätig" in u_low or "hochladen" in u_low):
+                requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "⚙️ **Ist in Bearbeitung...** Lade den bestätigten Code auf GitHub hoch."})
+                result_msg = execute_final_github_update(chat_id)
+                requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": result_msg})
+                return
+            else:
+                del pending_code_updates[chat_id]
+
         # 1. SCHRITT: Prüfen, ob es ein Code- oder GitHub-Befehl ist
-        messages = [{"role": "system", "content": f"Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. Wenn der Benutzer verlangt, Code zu ändern oder auf GitHub hochzuladen, musst du das Präfix '{REQUIRED_PREFIX}' prüfen und das Tool update_github_code verwenden."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
+        messages = [{"role": "system", "content": f"Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. Wenn der Benutzer verlangt, Code zu ändern, musst du das Tool update_github_code aufrufen, um eine Vorschau zu erstellen."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
         msg_obj, used_model = call_groq_text(messages)
         
         if hasattr(msg_obj, "tool_calls") and msg_obj.tool_calls:
             for tool_call in msg_obj.tool_calls:
                 if tool_call.function.name == "update_github_code":
-                    # HINWEIS: Zeigt dem Benutzer an, dass der Code bearbeitet wird
-                    requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "⚙️ **Ist in Bearbeitung...** Code wird angepasst und auf GitHub hochgeladen."})
-                    
                     args = json.loads(tool_call.function.arguments)
-                    result_msg = update_github_code(
+                    preview_msg = update_github_code(
                         args.get("file_path", "main.py"),
                         args["new_content"],
                         args["commit_message"],
-                        original_message=user_text
+                        chat_id=chat_id
                     )
-                    requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": result_msg})
+                    requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": preview_msg})
                     return
 
-        # Fallback falls kein Tool Call getriggert wurde, aber Code angefordert ist
         bot_reply = msg_obj.content if hasattr(msg_obj, "content") else str(msg_obj)
         if "github" in u_low or "code" in u_low or "funktion" in u_low or "update" in u_low:
             if not has_required_prefix(user_text):
