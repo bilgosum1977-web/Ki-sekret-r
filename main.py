@@ -52,6 +52,7 @@ pending_code_updates = {}
 APIFY_ACTORS = {
     "apify_google_shopping": "apify/google-shopping-scraper",
     "apify_amazon": "apify/amazon-extractor",
+    "apify_ebay": "apify/ebay-scraper",
 }
 
 
@@ -211,7 +212,7 @@ ai_tools = [
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         print("❌ APIFY_TOKEN ist leer oder nicht gesetzt!")
-        return None, 0.0
+        return {}, 0.0
 
     actor_id = APIFY_ACTORS.get(source_key, "apify/google-shopping-scraper")
     url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync?token={APIFY_TOKEN}"
@@ -228,7 +229,7 @@ def run_apify(source_key: str, query: str):
         
         if r.status_code != 200:
             print(f"❌ Apify HTTP-Fehler {r.status_code}: {r.text[:300]}")
-            return None, 0.0
+            return {}, 0.0
             
         data = r.json()
         usage = data.get("data", {}).get("usage", {}) or data.get("usage", {})
@@ -237,16 +238,16 @@ def run_apify(source_key: str, query: str):
         
         if not items or not isinstance(items, list):
             print(f"⚠️ Apify hat keine gültigen Items zurückgeliefert: {str(data)[:200]}")
-            return None, usd
+            return {}, usd
             
         print(f"✅ Erfolgreich {len(items)} Items von Apify ({source_key}) geladen.")
-        return items, usd
+        return {"items": items}, usd
     except Exception as e:
         print(f"⚠️ Ausnahmefehler bei Apify-Quelle {source_key}: {e}")
-        return None, 0.0
+        return {}, 0.0
 
 def search_searxng(query: str):
-    url = f"http://localhost:4000/search?q={query}&format=json"
+    url = f"{SEARXNG_URL}/search?q={query}&format=json"
     try:
         r = requests.get(url, timeout=5)
         r.raise_for_status()
@@ -263,7 +264,7 @@ def search_ddgs(query: str):
         return None
 
 
-# --- PRODUCT QUERY DETECTION & FORMATTING ---
+# --- DISPATCHER – PRODUKT-PRIORISIERT (DEIN ORIGINAL) ---
 def is_product_query(query: str) -> bool:
     product_keywords = [
         "kaufen", "preis", "kosten", "produkt", "angebot",
@@ -274,118 +275,83 @@ def is_product_query(query: str) -> bool:
     q = query.lower()
     return any(k in q for k in product_keywords)
 
-def format_products_for_telegram(items):
-    if not items or not isinstance(items, list):
-        return "Keine Live-Produktdaten gefunden."
-
-    formatted_lines = []
-    for i, item in enumerate(items[:5], 1):
-        title = item.get("title", "Unbekanntes Produkt")
-        price = item.get("price", "Preis auf Anfrage")
-        merchant = item.get("merchant") or item.get("source", "Online-Shop")
-        link = item.get("link", "") or item.get("href", "")
-
-        if link and link != "#":
-            merchant_display = f"[{merchant}]({link})"
-        else:
-            merchant_display = merchant
-
-        formatted_lines.append(
-            f"{i}. **{title}**\n"
-            f"   - Preis: **{price}**\n"
-            f"   - Anbieter: {merchant_display}\n"
-        )
-
-    return "\n".join(formatted_lines)
-
-
-# --- ROBUUSTER DISPATCHER (NEU) ---
 def dispatcher(query: str, user_id: str):
     user_level = get_user_level(user_id)
 
-    try:
-        # 1) Versuche immer zuerst Apify, falls Token da ist
-        if APIFY_TOKEN:
-            for src in ["apify_google_shopping", "apify_amazon"]:
-                apify_items, apify_cost_usd = run_apify(src, query)
-                if apify_items and isinstance(apify_items, list) and len(apify_items) > 0:
-                    apify_cost_eur = round(apify_cost_usd, 4)
-                    final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
+    ########################################################
+    # 1) PRODUKTANFRAGE? → APIFY ZUERST
+    ########################################################
+    if is_product_query(query):
+        # Apify-Priorität
+        for src in ["apify_amazon", "apify_google_shopping", "apify_ebay"]:
+            apify_data, apify_cost_usd = run_apify(src, query)
+            
+            items = apify_data.get("items", [])
+            if not items:
+                continue
 
-                    product_text = format_products_for_telegram(apify_items)
-                    final_ai_response = call_groq_analysis(product_text, mode="shopping")
-                    return {
-                        "status": "success",
-                        "response_text": final_ai_response
-                    }
+            apify_cost_eur = round(apify_cost_usd, 4)
+            final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
 
-        # 2) Fallback auf DuckDuckGo, falls Apify nichts liefert
-        ddgs_res = search_ddgs(query)
-        if ddgs_res and isinstance(ddgs_res, list):
-            formatted = "\n".join([f"- **{r.get('title')}**: {r.get('href')}" for r in ddgs_res[:5]])
+            # Free-User → Zustimmung nötig
+            if user_level == "free":
+                return {
+                    "status": "paid_required",
+                    "layer": "paid",
+                    "source": src,
+                    "cost_admin": apify_cost_eur,
+                    "cost_user": final_price_for_user,
+                    "results_preview": items,
+                    "message": (
+                        f"Für diese Produktsuche wird Apify benötigt.\n"
+                        f"Admin-Kosten: {apify_cost_eur} €\n"
+                        f"Dein Preis (inkl. Aufschlag): {final_price_for_user} €\n"
+                        f"Bitte bestätigen."
+                    ),
+                }
+
+            # Pro/VIP → direkt ausführen
             return {
                 "status": "success",
-                "response_text": f"🔍 **DuckDuckGo Ergebnisse für '{query}':**\n\n{formatted}"
+                "layer": "paid",
+                "source": src,
+                "cost_admin": apify_cost_eur,
+                "cost_user": final_price_for_user,
+                "results": items,
+                "message": (
+                    f"Kostenpflichtige Quelle {src} genutzt.\n"
+                    f"Admin-Kosten: {apify_cost_eur} €\n"
+                    f"Dein Preis: {final_price_for_user} €."
+                ),
             }
 
+    ########################################################
+    # 2) FREE-LAYER (SearXNG + DDGS)
+    ########################################################
+    searxng_res = search_searxng(query)
+    ddgs_res = search_ddgs(query)
+
+    if searxng_res or ddgs_res:
         return {
-            "status": "error",
-            "response_text": f"⚠️ Keine Live-Daten für '{query}' gefunden (Apify & Fallback blieben leer)."
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "response_text": f"❌ Dispatcher-Fehler: {str(e)}"
-        }
-
-
-# --- GROQ AI INTEGRATION ---
-def call_groq_analysis(products_text, mode: str):
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Du lebst IMMER im aktuellen Datum (2026). "
-                "Du bist ein professioneller Marktplatz-Broker für einen Telegram-Bot. "
-                "Fasse die Angebote übersichtlich zusammen, nenne das günstigste Angebot "
-                "und behalte die Markdown-Links ([Anbieter](URL)) unbedingt bei!"
-            )
-        },
-        {
-            "role": "user",
-            "content": f"Modus: {mode}\nAnalysiere diese Live-Produktdaten:\n{products_text}"
-        }
-    ]
-
-    try:
-        r = requests.post(
-            GROQ_API_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            json={
-                "model": "mixtral-8x7b-32768",
-                "messages": messages,
-                "temperature": 0.2
+            "status": "success",
+            "layer": "free",
+            "source": ["searxng", "ddgs"],
+            "cost_admin": 0.0,
+            "cost_user": 0.0,
+            "results": {
+                "searxng": searxng_res,
+                "ddgs": ddgs_res,
             },
-            timeout=15
-        )
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception:
-        return f"Hier sind die gefundenen Angebote:\n\n{products_text}"
+            "message": "Kostenlose Ergebnisse aus SearXNG/DDGS.",
+        }
 
-def call_groq_text(messages_list):
-    try:
-        res = groq_client.chat.completions.create(
-            model=GROQ_TEXT_MODEL,
-            messages=messages_list,
-            temperature=0.5,
-            max_tokens=1024,
-            tools=ai_tools,
-            tool_choice="auto"
-        )
-        return res.choices[0].message, f"Groq ({GROQ_TEXT_MODEL})"
-    except Exception as e:
-        return f"Fehler: {e}", "Groq (Error)"
+    ########################################################
+    # 3) FALLBACK
+    ########################################################
+    return {
+        "status": "error",
+        "message": "Es konnten keine passenden Ergebnisse gefunden werden."
+    }
 
 
 # --- ASYNC MESSAGE PROCESSOR ---
@@ -409,9 +375,9 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."})
             return
 
-        # Abfrage über Dispatcher leiten
+        # Abfrage über den originalen Dispatcher leiten
         dispatch_res = dispatcher(user_text, chat_id)
-        bot_reply = dispatch_res.get("response_text", "Keine Daten gefunden.")
+        bot_reply = dispatch_res.get("message", "Keine Daten gefunden.")
 
         requests.post(
             url_edit,
