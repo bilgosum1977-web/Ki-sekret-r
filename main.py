@@ -48,11 +48,11 @@ INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "
 user_live_searches = {}
 pending_code_updates = {}
 
-# --- APIFY ACTORS ---
+# --- APIFY ACTORS (GEPRÜFTE STORE-PFADE) ---
 APIFY_ACTORS = {
-    "apify_amazon": "apify~amazon-products-scraper",
-    "apify_google_shopping": "apify~google-shopping-scraper",
-    "apify_ebay": "apify~ebay-items-scraper",
+    "apify_amazon": "junglee/amazon-crawler",
+    "apify_google_shopping": "apify/google-shopping-scraper",
+    "apify_ebay": "maxcopell/ebay-scraper",
 }
 
 
@@ -214,7 +214,7 @@ def run_apify(source_key: str, query: str):
         raise RuntimeError("APIFY_TOKEN ist leer – bitte eintragen.")
 
     actor_id = APIFY_ACTORS[source_key]
-    url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync?token={APIFY_TOKEN}"
+    url = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/run-sync?token={APIFY_TOKEN}"
 
     payload = {
         "search": query,
@@ -300,7 +300,7 @@ def dispatcher(query: str, user_id: str):
                     ),
                 }
             except Exception:
-                continue
+                continue # Versuche beim Fehler den nächsten Actor im Loop
 
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
