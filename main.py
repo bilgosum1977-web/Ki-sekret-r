@@ -48,7 +48,7 @@ INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "
 user_live_searches = {}
 pending_code_updates = {}
 
-# --- APIFY ACTORS (GEPRÜFTE STORE-PFADE) ---
+# --- APIFY ACTORS ---
 APIFY_ACTORS = {
     "apify_amazon": "junglee/amazon-crawler",
     "apify_google_shopping": "apify/google-shopping-scraper",
@@ -208,7 +208,7 @@ ai_tools = [
 ]
 
 
-# --- APIFY RUN FUNKTION ---
+# --- APIFY RUN FUNKTION (UNIVERSELL) ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte eintragen.")
@@ -218,7 +218,9 @@ def run_apify(source_key: str, query: str):
 
     payload = {
         "search": query,
-        "maxItems": 20
+        "keyword": query,
+        "queries": [query],
+        "maxItems": 10
     }
 
     r = requests.post(url, json=payload)
@@ -279,10 +281,10 @@ def dispatcher(query: str, user_id: str):
                         "cost_user": final_price_for_user,
                         "results_preview": apify_data.get("items", apify_data),
                         "message": (
-                            f"Für diese Produktsuche wird Apify benötigt.\n"
+                            f"📦 **Produktsuche via {src}**\n\n"
                             f"Admin-Kosten: {apify_cost_eur} $\n"
                             f"Dein Preis (inkl. Aufschlag): {final_price_for_user} $\n"
-                            f"Bitte bestätigen."
+                            f"Erfolgreich ausgeführt!"
                         ),
                     }
 
@@ -299,8 +301,9 @@ def dispatcher(query: str, user_id: str):
                         f"Dein Preis: {final_price_for_user} $."
                     ),
                 }
-            except Exception:
-                continue # Versuche beim Fehler den nächsten Actor im Loop
+            except Exception as e:
+                print(f"Fehler bei {src}: {e}")
+                continue
 
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
@@ -321,7 +324,7 @@ def dispatcher(query: str, user_id: str):
 
     return {
         "status": "error",
-        "message": "Keine Quelle lieferte Ergebnisse."
+        "message": "Keine Quelle lieferte Ergebnisse (Apify-Aufruf fehlgeschlagen oder keine Treffer)."
     }
 
 
