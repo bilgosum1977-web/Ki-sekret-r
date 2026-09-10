@@ -165,6 +165,7 @@ ai_tools = [
     }
 ]
 
+# --- DUCKDUCKGO DDGS FALLBACK ---
 def duckduckgo_fallback(keyword: str):
     items = []
     try:
@@ -174,7 +175,7 @@ def duckduckgo_fallback(keyword: str):
                 title = r.get("title", "")
                 body = r.get("body", "")
                 url = r.get("href", "")
-                
+
                 price = None
                 m = re.search(r'(\d+[,\.]?\d*)\s?€', body + " " + title)
                 if m:
@@ -191,8 +192,9 @@ def duckduckgo_fallback(keyword: str):
                     "seller": "unbekannt",
                     "url": url
                 })
-    except Exception as e:
-        print(f"DuckDuckGo Fallback Fehler: {e}")
+    except Exception:
+        pass
+
     return items
 
 def fetch_live_marketplace_data(keyword: str, platform_filter: str, user_location: str, max_radius_km: float):
@@ -226,24 +228,27 @@ def extract_products(raw_results):
         if not title:
             continue
 
+        body = r.get("body", "") or r.get("snippet", "")
         price = r.get("price")
-        if price is None:
-            m = re.search(r'(\d+[,\.]?\d*)\s?€', title)
-            if m:
-                price = float(m.group(1).replace(",", "."))
 
         if price is None:
-            continue
+            m = re.search(r'(\d+[\.,]?\d*)\s?(?:€|EUR)', title + " " + body, re.IGNORECASE)
+            if m:
+                price = float(m.group(1).replace(".", "").replace(",", "."))
+
+        if price is None:
+            price = 0.0
 
         product = {
             "name": title,
             "price": price,
             "currency": r.get("currency", "EUR"),
             "image_url": r.get("image_url"),
-            "platform": r.get("platform", "unbekannt"),
+            "platform": r.get("platform", "duckduckgo"),
             "distance_km": r.get("distance_km"),
             "condition": r.get("condition", "unbekannt"),
             "seller": r.get("seller", "unbekannt"),
+            "url": r.get("url") or r.get("href", "")
         }
 
         products.append(product)
@@ -293,8 +298,8 @@ def call_groq_analysis(products, mode: str):
 def send_shopping_page(chat_id: int, products, page: int = 0):
     text_lines = [f"Shopping-Ergebnisse (Seite {page}):"]
     for p in products[:5]:
-        price_str = f"{p['price']} EUR" if p['price'] is not None else "Preis unbekannt"
-        text_lines.append(f"- {p['name']} ({p['platform']}) – {price_str}, Zustand: {p['condition']}")
+        price_str = f"{p['price']} EUR" if p['price'] > 0 else "Preis unbekannt"
+        text_lines.append(f"- {p['name']} ({p['platform']}) – {price_str}")
     text = "\n".join(text_lines)
 
     requests.post(
