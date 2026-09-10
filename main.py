@@ -48,7 +48,7 @@ INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "
 user_live_searches = {}
 pending_code_updates = {}
 
-# --- APIFY ACTORS (AKTUALISIERTE PFADE) ---
+# --- APIFY ACTORS ---
 APIFY_ACTORS = {
     "apify_amazon": "apify~amazon-products-scraper",
     "apify_google_shopping": "apify~google-shopping-scraper",
@@ -248,19 +248,14 @@ def search_ddgs(query: str):
         return None
 
 
-# --- NEUER PRODUKT-PRIORISIERTER DISPATCHER ---
+# --- PRODUKT-PRIORISIERTER DISPATCHER ---
 def is_product_query(query: str) -> bool:
-    """
-    Sehr einfache Produkt-Erkennung.
-    Du kannst später erweitern (LLM, Regex, Kategorien).
-    """
     product_keywords = [
         "kaufen", "preis", "kosten", "produkt", "angebot",
         "airpods", "iphone", "samsung", "dyson", "ps5",
         "headset", "kopfhörer", "monitor", "tv", "fernseher",
         "google shopping", "amazon", "ebay"
     ]
-
     q = query.lower()
     return any(k in q for k in product_keywords)
 
@@ -268,57 +263,44 @@ def is_product_query(query: str) -> bool:
 def dispatcher(query: str, user_id: str):
     user_level = get_user_level(user_id)
 
-    ########################################################
-    # 1) PRODUKTANFRAGE? → APIFY ZUERST
-    ########################################################
-
     if is_product_query(query):
-
-        # Apify-Priorität
         for src in ["apify_amazon", "apify_google_shopping", "apify_ebay"]:
+            try:
+                apify_data, apify_cost_usd = run_apify(src, query)
+                apify_cost_eur = round(apify_cost_usd, 4)
+                final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
 
-            apify_data, apify_cost_usd = run_apify(src, query)
-            apify_cost_eur = round(apify_cost_usd, 4)
-            final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
+                if user_level == "free":
+                    return {
+                        "status": "paid_required",
+                        "layer": "paid",
+                        "source": src,
+                        "cost_admin": apify_cost_eur,
+                        "cost_user": final_price_for_user,
+                        "results_preview": apify_data.get("items", apify_data),
+                        "message": (
+                            f"Für diese Produktsuche wird Apify benötigt.\n"
+                            f"Admin-Kosten: {apify_cost_eur} $\n"
+                            f"Dein Preis (inkl. Aufschlag): {final_price_for_user} $\n"
+                            f"Bitte bestätigen."
+                        ),
+                    }
 
-            # Free-User → Zustimmung nötig
-            if user_level == "free":
                 return {
-                    "status": "paid_required",
+                    "status": "success",
                     "layer": "paid",
                     "source": src,
                     "cost_admin": apify_cost_eur,
                     "cost_user": final_price_for_user,
-                    "results_preview": apify_data.get("items", apify_data),
+                    "results": apify_data.get("items", apify_data),
                     "message": (
-                        f"Für diese Produktsuche wird Apify benötigt.\n"
-                        f"Admin-Kosten: {apify_cost_eur} €\n"
-                        f"Dein Preis (inkl. Aufschlag): {final_price_for_user} €\n"
-                        f"Bitte bestätigen."
+                        f"Kostenpflichtige Quelle {src} genutzt.\n"
+                        f"Admin-Kosten: {apify_cost_eur} $\n"
+                        f"Dein Preis: {final_price_for_user} $."
                     ),
                 }
-
-            # Pro/VIP → direkt ausführen
-            return {
-                "status": "success",
-                "layer": "paid",
-                "source": src,
-                "cost_admin": apify_cost_eur,
-                "cost_user": final_price_for_user,
-                "results": apify_data.get("items", apify_data),
-                "message": (
-                    f"Kostenpflichtige Quelle {src} genutzt.\n"
-                    f"Admin-Kosten: {apify_cost_eur} €\n"
-                    f"Dein Preis: {final_price_for_user} €."
-                ),
-            }
-
-        # Falls Apify nichts liefert → Free-Layer nutzen
-        # Weiter unten kommt Free-Layer automatisch
-
-    ########################################################
-    # 2) FREE-LAYER (SearXNG + DDGS)
-    ########################################################
+            except Exception:
+                continue
 
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
@@ -336,10 +318,6 @@ def dispatcher(query: str, user_id: str):
             },
             "message": "Kostenlose Ergebnisse aus SearXNG/DDGS.",
         }
-
-    ########################################################
-    # 3) FALLBACK
-    ########################################################
 
     return {
         "status": "error",
@@ -368,7 +346,6 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."})
             return
 
-        # Abfrage über den Dispatcher leiten
         dispatch_res = dispatcher(user_text, chat_id)
         bot_reply = dispatch_res.get("message", "Keine Daten gefunden.")
 
