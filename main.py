@@ -48,11 +48,11 @@ INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "
 user_live_searches = {}
 pending_code_updates = {}
 
-# --- APIFY ACTORS (ROBUSTE PFADE) ---
+# --- APIFY ACTORS (AKTUALISIERTE PFADE) ---
 APIFY_ACTORS = {
-    "apify_google_shopping": "apify/google-shopping-scraper",
-    "apify_amazon": "apify/amazon-extractor",
-    "apify_ebay": "apify/ebay-scraper",
+    "apify_amazon": "apify~amazon-products-scraper",
+    "apify_google_shopping": "apify~google-shopping-scraper",
+    "apify_ebay": "apify~ebay-items-scraper",
 }
 
 
@@ -208,7 +208,7 @@ ai_tools = [
 ]
 
 
-# --- SCHLÜSSELFERTIGER APIFY-RUN FIX ---
+# --- APIFY RUN FUNKTION ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte eintragen.")
@@ -217,7 +217,7 @@ def run_apify(source_key: str, query: str):
     url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync?token={APIFY_TOKEN}"
 
     payload = {
-        "search": query,   # WICHTIG: Apify erwartet 'search', nicht 'query'
+        "search": query,
         "maxItems": 20
     }
 
