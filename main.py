@@ -48,11 +48,10 @@ INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "
 user_live_searches = {}
 pending_code_updates = {}
 
-# --- APIFY ACTORS (SCHLÜSSELFERTIG) ---
+# --- APIFY ACTORS (ROBUSTE PFADE) ---
 APIFY_ACTORS = {
-    "apify_amazon": "apify/amazon-products-scraper",
     "apify_google_shopping": "apify/google-shopping-scraper",
-    "apify_ebay": "apify/ebay-items-scraper",
+    "apify_amazon": "apify/amazon-extractor",
 }
 
 
@@ -91,7 +90,6 @@ init_db()
 
 # --- USER MODEL & COST LOGIC ---
 def get_user_level(user_id: str) -> str:
-    # Hier kann später eine echte DB-Prüfung für Pro/VIP-User erfolgen
     return "free"
 
 COST_REGISTRY = {
@@ -137,8 +135,7 @@ def update_github_code(file_path, new_content, commit_message, chat_id):
         return (
             "❌ **INTEGRITÄTS-ABWEHR AKTIVIERT**\n\n"
             "Der von der KI vorgeschlagene Code verstößt gegen die Grundsicherheitsregeln!\n"
-            f"Grund: `{error_reason}`.\n\n"
-            "👉 Das Update wurde **automatisch blockiert**, damit keine wichtigen Kernfunktionen verloren gehen."
+            f"Grund: `{error_reason}`.\n"
         )
 
     pending_code_updates[chat_id] = {
@@ -149,7 +146,6 @@ def update_github_code(file_path, new_content, commit_message, chat_id):
     preview_snippet = new_content[:500] + ("\n... [Code ist länger] ..." if len(new_content) > 500 else "")
     return (
         "🛡️ **SICHERHEITS-KONTROLLE (VORSCHAU GEPRÜFT)**\n\n"
-        "Der Code hat den Integritäts-Check bestanden. Noch nichts auf GitHub geändert.\n\n"
         f"📁 **Datei:** `{file_path}`\n"
         f"💬 **Commit-Nachricht:** `{commit_message}`\n\n"
         "📜 **Vorschau:**\n```python\n" + preview_snippet + "\n```\n\n"
@@ -211,26 +207,43 @@ ai_tools = [
 ]
 
 
-# --- APIFY & SCRAPING ENGINE ---
+# --- ROBUSTE APIFY & SCRAPING ENGINE ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
+        print("❌ APIFY_TOKEN ist leer oder nicht gesetzt!")
         return None, 0.0
 
-    actor_id = APIFY_ACTORS[source_key]
+    actor_id = APIFY_ACTORS.get(source_key, "apify/google-shopping-scraper")
     url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync?token={APIFY_TOKEN}"
-    payload = {"searchString": query, "query": query}
+    
+    # Universelles Payload für verschiedene Scraper-Typen
+    payload = {
+        "queries": [query],
+        "searchString": query,
+        "maxItems": 5
+    }
 
     try:
-        r = requests.post(url, json=payload, timeout=30)
-        r.raise_for_status()
+        print(f"🔄 Starte Apify Actor {actor_id} für Abfrage: '{query}'")
+        r = requests.post(url, json=payload, timeout=45)
+        
+        if r.status_code != 200:
+            print(f"❌ Apify HTTP-Fehler {r.status_code}: {r.text[:300]}")
+            return None, 0.0
+            
         data = r.json()
-
         usage = data.get("data", {}).get("usage", {}) or data.get("usage", {})
         usd = float(usage.get("totalUsd", 0.0))
         items = data.get("data", {}).get("items") or data.get("items") or data
+        
+        if not items or not isinstance(items, list):
+            print(f"⚠️ Apify hat keine gültigen Items zurückgeliefert: {str(data)[:200]}")
+            return None, usd
+            
+        print(f"✅ Erfolgreich {len(items)} Items von Apify ({source_key}) geladen.")
         return items, usd
     except Exception as e:
-        print(f"⚠️ Apify Fehler bei {source_key}: {e}")
+        print(f"⚠️ Ausnahmefehler bei Apify-Quelle {source_key}: {e}")
         return None, 0.0
 
 def search_searxng(query: str):
@@ -293,7 +306,7 @@ def dispatcher(query: str, user_id: str):
 
     # 1) PRODUKTANFRAGE? → APIFY ZUERST
     if is_product_query(query) and APIFY_TOKEN:
-        for src in ["apify_amazon", "apify_google_shopping", "apify_ebay"]:
+        for src in ["apify_google_shopping", "apify_amazon"]:
             apify_items, apify_cost_usd = run_apify(src, query)
 
             if apify_items is not None:
@@ -307,8 +320,7 @@ def dispatcher(query: str, user_id: str):
                         "response_text": (
                             f"🔍 **Apify Live-Suche ({src})**\n\n"
                             f"{product_preview}\n\n"
-                            f"Admin-Kosten: {apify_cost_eur} € | Dein Preis: {final_price_for_user} €\n"
-                            "*(Freigabe für Free-Tier ausstehend)*"
+                            f"Admin-Kosten: {apify_cost_eur} € | Dein Preis: {final_price_for_user} €"
                         )
                     }
 
@@ -405,7 +417,6 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."})
             return
 
-        # Dispatcher-Aufruf für Live-Daten & Shopping oder Standard-Chat
         if is_product_query(user_text):
             dispatch_res = dispatcher(user_text, chat_id)
             bot_reply = dispatch_res.get("response_text", "Keine Daten gefunden.")
@@ -431,7 +442,6 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             if str(chat_id) == ADMIN_USER_ID:
                 bot_reply += f"\n\n--- [ADMIN-INFO] ---\n🤖 KI: {used_model} | Integrität: 🛡️ Geschützt"
 
-        # Telegram Nachricht abschicken mit Markdown & deaktivierter Vorschau
         requests.post(
             url_edit,
             json={
