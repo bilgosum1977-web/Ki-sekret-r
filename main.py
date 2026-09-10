@@ -1,4 +1,16 @@
-import os, io, sqlite3, json, base64, time, threading, concurrent.futures, smtplib, re
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import io
+import sqlite3
+import json
+import base64
+import time
+import threading
+import concurrent.futures
+import smtplib
+import re
 from email.mime.text import MIMEText
 from flask import Flask, request
 import requests
@@ -36,6 +48,14 @@ INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "
 user_live_searches = {}
 pending_code_updates = {}
 
+# --- APIFY ACTORS (SCHLÜSSELFERTIG) ---
+APIFY_ACTORS = {
+    "apify_amazon": "apify/amazon-products-scraper",
+    "apify_google_shopping": "apify/google-shopping-scraper",
+    "apify_ebay": "apify/ebay-items-scraper",
+}
+
+
 # --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -68,6 +88,31 @@ def save_demand(user_id, title, location, max_price):
 
 init_db()
 
+
+# --- USER MODEL & COST LOGIC ---
+def get_user_level(user_id: str) -> str:
+    # Hier kann später eine echte DB-Prüfung für Pro/VIP-User erfolgen
+    return "free"
+
+COST_REGISTRY = {
+    "searxng": {"type": "free"},
+    "ddgs": {"type": "free"},
+    "groq_analysis": {"type": "free"},
+    "apify_amazon": {"type": "paid"},
+    "apify_google_shopping": {"type": "paid"},
+    "apify_ebay": {"type": "paid"},
+}
+
+def calculate_price_with_markup(base_cost: float, user_level: str) -> float:
+    MARKUP = {
+        "free": 2.0,
+        "pro": 1.5,
+        "vip": 1.0,
+    }
+    return round(base_cost * MARKUP.get(user_level, 2.0), 4)
+
+
+# --- CODE INTEGRITY & GITHUB UPDATES ---
 def has_required_prefix(message: str) -> bool:
     if not message:
         return False
@@ -93,7 +138,7 @@ def update_github_code(file_path, new_content, commit_message, chat_id):
             "❌ **INTEGRITÄTS-ABWEHR AKTIVIERT**\n\n"
             "Der von der KI vorgeschlagene Code verstößt gegen die Grundsicherheitsregeln!\n"
             f"Grund: `{error_reason}`.\n\n"
-            "👉 Das Update wurde **automatisch blockiert**, damit keine wichtigen Kernfunktionen oder Sicherheits-Präfixe verloren gehen."
+            "👉 Das Update wurde **automatisch blockiert**, damit keine wichtigen Kernfunktionen verloren gehen."
         )
 
     pending_code_updates[chat_id] = {
@@ -101,10 +146,10 @@ def update_github_code(file_path, new_content, commit_message, chat_id):
         "new_content": new_content,
         "commit_message": commit_message
     }
-    preview_snippet = new_content[:500] + ("\n... [Code ist länger, Rest wird im Commit übernommen] ..." if len(new_content) > 500 else "")
+    preview_snippet = new_content[:500] + ("\n... [Code ist länger] ..." if len(new_content) > 500 else "")
     return (
-        "🛡️ **SICHERHEITS-KONTROLLE (VORSCHAU & INTEGRITÄT GEPRÜFT)**\n\n"
-        "Der Code hat den Integritäts-Check bestanden. **Noch nichts** auf GitHub geändert.\n\n"
+        "🛡️ **SICHERHEITS-KONTROLLE (VORSCHAU GEPRÜFT)**\n\n"
+        "Der Code hat den Integritäts-Check bestanden. Noch nichts auf GitHub geändert.\n\n"
         f"📁 **Datei:** `{file_path}`\n"
         f"💬 **Commit-Nachricht:** `{commit_message}`\n\n"
         "📜 **Vorschau:**\n```python\n" + preview_snippet + "\n```\n\n"
@@ -165,117 +210,146 @@ ai_tools = [
     }
 ]
 
-# --- DUCKDUCKGO DDGS FALLBACK ---
-def duckduckgo_fallback(keyword: str):
-    items = []
+
+# --- APIFY & SCRAPING ENGINE ---
+def run_apify(source_key: str, query: str):
+    if not APIFY_TOKEN:
+        return None, 0.0
+
+    actor_id = APIFY_ACTORS[source_key]
+    url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync?token={APIFY_TOKEN}"
+    payload = {"searchString": query, "query": query}
+
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        usage = data.get("data", {}).get("usage", {}) or data.get("usage", {})
+        usd = float(usage.get("totalUsd", 0.0))
+        items = data.get("data", {}).get("items") or data.get("items") or data
+        return items, usd
+    except Exception as e:
+        print(f"⚠️ Apify Fehler bei {source_key}: {e}")
+        return None, 0.0
+
+def search_searxng(query: str):
+    url = f"http://localhost:4000/search?q={query}&format=json"
+    try:
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+def search_ddgs(query: str):
     try:
         with DDGS(timeout=5) as ddgs:
-            results = list(ddgs.text(f"{keyword} preis kaufen", max_results=5))
-            for r in results:
-                title = r.get("title", "")
-                body = r.get("body", "")
-                url = r.get("href", "")
-
-                price = None
-                m = re.search(r'(\d+[,\.]?\d*)\s?€', body + " " + title)
-                if m:
-                    price = float(m.group(1).replace(",", "."))
-
-                items.append({
-                    "title": title,
-                    "price": price,
-                    "currency": "EUR",
-                    "image_url": None,
-                    "platform": "duckduckgo",
-                    "distance_km": None,
-                    "condition": "unbekannt",
-                    "seller": "unbekannt",
-                    "url": url
-                })
+            results = list(ddgs.text(f"{query} preis kaufen", max_results=5))
+            return results
     except Exception:
-        pass
+        return None
 
-    return items
 
-def fetch_live_marketplace_data(keyword: str, platform_filter: str, user_location: str, max_radius_km: float):
-    params = {
-        "q": f"{keyword} preis kaufen",
-        "categories": "shopping",
-        "format": "json",
-        "engines": "amazon,ebay,shopping"
-    }
+# --- PRODUCT QUERY DETECTION & FORMATTING ---
+def is_product_query(query: str) -> bool:
+    product_keywords = [
+        "kaufen", "preis", "kosten", "produkt", "angebot",
+        "airpods", "iphone", "samsung", "dyson", "ps5",
+        "headset", "kopfhörer", "monitor", "tv", "fernseher",
+        "google shopping", "amazon", "ebay", "suche", "suche nach"
+    ]
+    q = query.lower()
+    return any(k in q for k in product_keywords)
 
-    results = []
-    try:
-        active_url = SEARXNG_URL if "localhost" not in SEARXNG_URL else "https://searx.be"
-        r = requests.get(active_url, params=params, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            results = data.get("results", [])
-    except Exception:
-        pass
+def format_products_for_telegram(items):
+    if not items or not isinstance(items, list):
+        return "Keine Live-Produktdaten gefunden."
 
-    if not results:
-        results = duckduckgo_fallback(keyword)
+    formatted_lines = []
+    for i, item in enumerate(items[:5], 1):
+        title = item.get("title", "Unbekanntes Produkt")
+        price = item.get("price", "Preis auf Anfrage")
+        merchant = item.get("merchant") or item.get("source", "Online-Shop")
+        link = item.get("link", "") or item.get("href", "")
 
-    return results
+        if link and link != "#":
+            merchant_display = f"[{merchant}]({link})"
+        else:
+            merchant_display = merchant
 
-def extract_products(raw_results):
-    products = []
+        formatted_lines.append(
+            f"{i}. **{title}**\n"
+            f"   - Preis: **{price}**\n"
+            f"   - Anbieter: {merchant_display}\n"
+        )
 
-    for r in raw_results:
-        title = r.get("title") or r.get("name")
-        if not title:
-            continue
+    return "\n".join(formatted_lines)
 
-        body = r.get("body", "") or r.get("snippet", "")
-        price = r.get("price")
 
-        if price is None:
-            m = re.search(r'(\d+[\.,]?\d*)\s?(?:€|EUR)', title + " " + body, re.IGNORECASE)
-            if m:
-                price = float(m.group(1).replace(".", "").replace(",", "."))
+# --- DISPATCHER ---
+def dispatcher(query: str, user_id: str):
+    user_level = get_user_level(user_id)
 
-        if price is None:
-            price = 0.0
+    # 1) PRODUKTANFRAGE? → APIFY ZUERST
+    if is_product_query(query) and APIFY_TOKEN:
+        for src in ["apify_amazon", "apify_google_shopping", "apify_ebay"]:
+            apify_items, apify_cost_usd = run_apify(src, query)
 
-        product = {
-            "name": title,
-            "price": price,
-            "currency": r.get("currency", "EUR"),
-            "image_url": r.get("image_url"),
-            "platform": r.get("platform", "duckduckgo"),
-            "distance_km": r.get("distance_km"),
-            "condition": r.get("condition", "unbekannt"),
-            "seller": r.get("seller", "unbekannt"),
-            "url": r.get("url") or r.get("href", "")
+            if apify_items is not None:
+                apify_cost_eur = round(apify_cost_usd, 4)
+                final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
+
+                if user_level == "free":
+                    product_preview = format_products_for_telegram(apify_items[:3] if isinstance(apify_items, list) else [])
+                    return {
+                        "status": "paid_required",
+                        "response_text": (
+                            f"🔍 **Apify Live-Suche ({src})**\n\n"
+                            f"{product_preview}\n\n"
+                            f"Admin-Kosten: {apify_cost_eur} € | Dein Preis: {final_price_for_user} €\n"
+                            "*(Freigabe für Free-Tier ausstehend)*"
+                        )
+                    }
+
+                product_text = format_products_for_telegram(apify_items)
+                final_ai_response = call_groq_analysis(product_text, mode="shopping")
+                return {
+                    "status": "success",
+                    "response_text": final_ai_response
+                }
+
+    # 2) FREE-LAYER FALLBACK
+    searxng_res = search_searxng(query)
+    ddgs_res = search_ddgs(query)
+
+    if searxng_res or ddgs_res:
+        return {
+            "status": "success",
+            "response_text": f"Ergebnisse für '{query}' aus dem Free-Layer abgerufen."
         }
 
-        products.append(product)
+    return {
+        "status": "error",
+        "response_text": "Es konnten keine passenden Ergebnisse gefunden werden."
+    }
 
-    return products
 
-def normalize_price(price, currency: str):
-    if price is None:
-        return None
-    if currency == "TRY":
-        return round(price * 0.03, 2)
-    return price
-
-def call_groq_analysis(products, mode: str):
+# --- GROQ AI INTEGRATION ---
+def call_groq_analysis(products_text, mode: str):
     messages = [
         {
             "role": "system",
             "content": (
                 "Du lebst IMMER im aktuellen Datum (2026). "
-                "Du nutzt IMMER die Live-Daten aus dem System. "
-                "Du entscheidest NICHT selbst über Produkte, Preise oder Modelle. "
-                "Du analysierst NUR die Daten, die dir das System liefert."
+                "Du bist ein professioneller Marktplatz-Broker für einen Telegram-Bot. "
+                "Fasse die Angebote übersichtlich zusammen, nenne das günstigste Angebot "
+                "und behalte die Markdown-Links ([Anbieter](URL)) unbedingt bei!"
             )
         },
         {
             "role": "user",
-            "content": f"Modus: {mode}\nAnalysiere diese Produkte:\n{products}"
+            "content": f"Modus: {mode}\nAnalysiere diese Live-Produktdaten:\n{products_text}"
         }
     ]
 
@@ -293,20 +367,24 @@ def call_groq_analysis(products, mode: str):
         data = r.json()
         return data["choices"][0]["message"]["content"]
     except Exception:
-        return "Analyse konnte nicht durchgeführt werden."
+        return f"Hier sind die gefundenen Angebote:\n\n{products_text}"
 
-def send_shopping_page(chat_id: int, products, page: int = 0):
-    text_lines = [f"Shopping-Ergebnisse (Seite {page}):"]
-    for p in products[:5]:
-        price_str = f"{p['price']} EUR" if p['price'] > 0 else "Preis unbekannt"
-        text_lines.append(f"- {p['name']} ({p['platform']}) – {price_str}")
-    text = "\n".join(text_lines)
+def call_groq_text(messages_list):
+    try:
+        res = groq_client.chat.completions.create(
+            model=GROQ_TEXT_MODEL,
+            messages=messages_list,
+            temperature=0.5,
+            max_tokens=1024,
+            tools=ai_tools,
+            tool_choice="auto"
+        )
+        return res.choices[0].message, f"Groq ({GROQ_TEXT_MODEL})"
+    except Exception as e:
+        return f"Fehler: {e}", "Groq (Error)"
 
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": text}
-    )
 
+# --- ASYNC MESSAGE PROCESSOR ---
 def process_message_async(chat_id, user_text, loading_msg_id):
     try:
         u_low = user_text.lower()
@@ -324,27 +402,14 @@ def process_message_async(chat_id, user_text, loading_msg_id):
 
         greetings = ["hallo", "hi", "guten morgen", "guten tag", "moin", "servus", "hey"]
         if any(g in u_low for g in greetings):
-            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Wie kann ich dir helfen?"})
+            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."})
             return
 
-        shopping_intents = ["suche", "kaufen", "preis", "angebot", "deal", "produkt", "modell"]
-        compare_intents  = ["vergleiche", "vergleich", "vs"]
-        analysis_intents = ["analysiere", "bewerte", "checke", "prüfe"]
-
-        product_patterns = [
-            "samsung", "galaxy", "iphone", "dyson", "ps5", "airpods", "xiaomi",
-            "huawei", "oneplus", "ipad", "macbook", "lenovo", "asus", "sony"
-        ]
-
-        intent = None
-        if any(kw in u_low for kw in shopping_intents) and any(p in u_low for p in product_patterns):
-            intent = "shopping"
-        elif any(kw in u_low for kw in compare_intents) and any(p in u_low for p in product_patterns):
-            intent = "compare"
-        elif any(kw in u_low for kw in analysis_intents) and any(p in u_low for p in product_patterns):
-            intent = "analysis"
-
-        if intent is None:
+        # Dispatcher-Aufruf für Live-Daten & Shopping oder Standard-Chat
+        if is_product_query(user_text):
+            dispatch_res = dispatcher(user_text, chat_id)
+            bot_reply = dispatch_res.get("response_text", "Keine Daten gefunden.")
+        else:
             system_prompt = "Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker."
             messages = [{"role": "system", "content": system_prompt}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
             msg_obj, used_model = call_groq_text(messages)
@@ -366,59 +431,29 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             if str(chat_id) == ADMIN_USER_ID:
                 bot_reply += f"\n\n--- [ADMIN-INFO] ---\n🤖 KI: {used_model} | Integrität: 🛡️ Geschützt"
 
-            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply, "parse_mode": "Markdown"})
-            return
-
-        clean_keyword = u_low
-        filler_words = ["suche", "neueste", "neuer", "neues", "kaufen", "preis", "angebot", "deal", "produkt", "modell", "bitte", "mal"]
-        for kw in filler_words:
-            clean_keyword = clean_keyword.replace(kw, "")
-        for kw in shopping_intents + compare_intents + analysis_intents:
-            clean_keyword = clean_keyword.replace(kw, "")
-            
-        clean_keyword = clean_keyword.strip()
-        if not clean_keyword:
-            clean_keyword = "airpods"
-
-        save_demand(chat_id, clean_keyword, "Gelsenkirchen", 150.0)
-
-        raw_results = fetch_live_marketplace_data(clean_keyword, "all", "Gelsenkirchen", 20)
-        products = extract_products(raw_results)
-
-        for p in products:
-            p["price"] = normalize_price(p["price"], p.get("currency", "EUR"))
-
-        if not products:
-            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Keine Produkte für '{clean_keyword}' gefunden."})
-            return
-
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage", json={"chat_id": chat_id, "message_id": loading_msg_id})
-        send_shopping_page(chat_id, products, page=0)
-
-        analysis_text = call_groq_analysis(products, mode=intent)
+        # Telegram Nachricht abschicken mit Markdown & deaktivierter Vorschau
         requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": analysis_text}
+            url_edit,
+            json={
+                "chat_id": chat_id,
+                "message_id": loading_msg_id,
+                "text": bot_reply,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True
+            }
         )
 
     except Exception as e:
-        try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Fehler: {str(e)}"})
-        except: pass
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
+                json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Fehler aufgetreten: {str(e)}"}
+            )
+        except:
+            pass
 
-def call_groq_text(messages_list):
-    try:
-        res = groq_client.chat.completions.create(
-            model=GROQ_TEXT_MODEL,
-            messages=messages_list,
-            temperature=0.5,
-            max_tokens=1024,
-            tools=ai_tools,
-            tool_choice="auto"
-        )
-        return res.choices[0].message, f"Groq ({GROQ_TEXT_MODEL})"
-    except Exception as e:
-        return f"Fehler: {e}", "Groq (Error)"
 
+# --- FLASK WEBHOOK ---
 def handle_callback_query(callback_data, chat_id, message_id):
     pass
 
@@ -446,7 +481,10 @@ def webhook():
             chat_id = str(msg["chat"]["id"])
             text = msg.get("text", msg.get("caption", ""))
             if text:
-                res = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "Verarbeite..."}).json()
+                res = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage..."}
+                ).json()
                 lid = res.get("result", {}).get("message_id")
                 if lid:
                     executor.submit(process_message_async, chat_id, text, lid)
@@ -457,6 +495,7 @@ def webhook():
 @app.route("/ping", methods=["GET"])
 def ping():
     return "Bot is alive!", 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
