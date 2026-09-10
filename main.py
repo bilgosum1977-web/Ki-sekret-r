@@ -63,22 +63,6 @@ def save_demand(user_id, title, location, max_price):
     conn.cursor().execute('INSERT INTO marketplace_demand (user_id, title, location, max_price) VALUES (?, ?, ?, ?)', (str(user_id), title, location, max_price))
     conn.commit(); conn.close()
 
-def check_marketplace_matching(new_product_title, new_product_price, new_product_location):
-    """Prüft, ob ein neues Angebot zu den gespeicherten Suchanfragen (Demand) passt."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, title, max_price FROM marketplace_demand')
-    demands = cursor.fetchall()
-    conn.close()
-    
-    matches = []
-    for user_id, title, max_price in demands:
-        # Einfaches Keyword-Matching
-        if any(word.lower() in new_product_title.lower() for word in title.split()):
-            if new_product_price <= max_price:
-                matches.append(user_id)
-    return matches
-
 init_db()
 
 # --- PRÄFIX PRÜFUNG ---
@@ -87,8 +71,33 @@ def has_required_prefix(message: str) -> bool:
         return False
     return message.strip().startswith(REQUIRED_PREFIX)
 
-# --- GITHUB UPDATE TOOL (SICHERER VORSCHAU-MODUS) ---
+# --- INTEGRIÄTS-SCHUTZ (PRÜFT OB ESSENZIELLE FUNKTIONEN ERHALTEN BLEIBEN) ---
+def validate_code_integrity(new_content: str) -> tuple[bool, str]:
+    """Prüft, ob kritische Bausteine im neuen Code enthalten sind."""
+    required_keywords = [
+        "REQUIRED_PREFIX",
+        "update_github_code",
+        "execute_final_github_update",
+        "webhook",
+        "ADMIN_USER_ID"
+    ]
+    missing = [kw for kw in required_keywords if kw not in new_content]
+    if missing:
+        return False, f"Fehlende Pflicht-Komponenten: {', '.join(missing)}"
+    return True, "OK"
+
+# --- GITHUB UPDATE TOOL (SICHERER VORSCHAU-MODUS MIT SCHUTZ) ---
 def update_github_code(file_path, new_content, commit_message, chat_id):
+    # Integritätsprüfung durchführen, bevor die Vorschau generiert wird
+    is_valid, error_reason = validate_code_integrity(new_content)
+    if not is_valid:
+        return (
+            f"❌ **INTEGRITÄTS-ABWEHR AKTIVIERT**\n\n"
+            f"Der von der KI vorgeschlagene Code verstößt gegen die Grundsicherheitsregeln!\n"
+            f"Grund: `{error_reason}`.\n\n"
+            f"👉 Das Update wurde **automatisch blockiert**, damit keine wichtigen Kernfunktionen oder Sicherheits-Präfixe verloren gehen."
+        )
+
     pending_code_updates[chat_id] = {
         "file_path": file_path,
         "new_content": new_content,
@@ -96,8 +105,8 @@ def update_github_code(file_path, new_content, commit_message, chat_id):
     }
     preview_snippet = new_content[:500] + ("\n... [Code ist länger, Rest wird im Commit übernommen] ..." if len(new_content) > 500 else "")
     return (
-        f"🛡️ **SICHERHEITS-KONTROLLE (VORSCHAU)**\n\n"
-        f"Ich habe deine Code-Anfrage vorbereitet, aber **noch nichts** auf GitHub geändert.\n\n"
+        f"🛡️ **SICHERHEITS-KONTROLLE (VORSCHAU & INTEGRIÄT GEPRÜFT)**\n\n"
+        f"Der Code hat den Integritäts-Check bestanden. **Noch nichts** auf GitHub geändert.\n\n"
         f"📁 **Datei:** `{file_path}`\n"
         f"💬 **Commit-Nachricht:** `{commit_message}`\n\n"
         f"📜 **Vorschau:**\n```python\n{preview_snippet}\n```\n\n"
@@ -177,19 +186,15 @@ def get_live_lira_rate():
         return 36.5
 
 def calculate_distance(target_location, item_location_name="Gelsenkirchen"):
-    """Echte Entfernungsberechnung in km mit Geopy."""
     try:
         geolocator = Nominatim(user_agent="ki_sekretaer_bot")
         loc1 = geolocator.geocode(target_location)
         loc2 = geolocator.geocode(item_location_name)
         if loc1 and loc2:
-            coords1 = (loc1.latitude, loc1.longitude)
-            coords2 = (loc2.latitude, loc2.longitude)
-            dist = geodesic(coords1, coords2).kilometers
-            return round(dist, 1)
+            return round(geodesic((loc1.latitude, loc1.longitude), (loc2.latitude, loc2.longitude)).kilometers, 1)
     except:
         pass
-    return 12.5 # Fallback realistischer Wert
+    return 12.5
 
 def fetch_live_marketplace_data(query, platform_filter="all", user_location="Gelsenkirchen", max_radius_km=20):
     active_url = SEARXNG_URL if "localhost" not in SEARXNG_URL else "https://searx.be"
@@ -218,28 +223,17 @@ def fetch_live_marketplace_data(query, platform_filter="all", user_location="Gel
             elif "ebay.de" in url: platform = "eBay"
             elif "kleinanzeigen.de" in url: platform = "Kleinanzeigen"
             
-            estimated_price = 45.00 + (idx * 15) 
-            price_eur = round(estimated_price, 2)
-            price_tl = round(estimated_price * lira_rate, 2)
-            is_import = platform in ["Trendyol", "Hepsiburada"]
-            
-            # Echte Entfernungsprüfung
+            price_eur = round(45.00 + (idx * 15), 2)
+            price_tl = round(price_eur * lira_rate, 2)
             distance_km = calculate_distance(user_location)
             
-            # Filter nach Radius (nur lokale Plattformen wie Kleinanzeigen unterliegen streng dem Radius)
             if platform == "Kleinanzeigen" and distance_km > max_radius_km:
                 continue
 
             extracted_products.append({
-                "id": idx + 1,
-                "platform": platform,
-                "title": title[:40] + "...",
-                "price_eur": price_eur,
-                "price_tl": price_tl,
-                "is_import": is_import,
-                "distance_km": distance_km,
-                "img": img_url,
-                "url": url
+                "id": idx + 1, "platform": platform, "title": title[:40] + "...",
+                "price_eur": price_eur, "price_tl": price_tl, "is_import": platform in ["Trendyol", "Hepsiburada"],
+                "distance_km": distance_km, "img": img_url, "url": url
             })
         return extracted_products
     except:
@@ -272,54 +266,39 @@ def call_premium_ai(messages_list, provider="groq"):
 def send_shopping_page(chat_id, user_key, page=0, edit_id=None):
     pool = user_live_searches.get(user_key, [])
     if not pool:
-        url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url_msg, json={"chat_id": chat_id, "text": "⚠️ Keine Live-Ergebnisse im Suchspeicher gefunden."})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ Keine Live-Ergebnisse im Suchspeicher gefunden."})
         return
 
-    start_idx = page * 3
-    end_idx = start_idx + 3
-    products = pool[start_idx:end_idx]
+    start_idx, products = page * 3, pool[page * 3 : page * 3 + 3]
     if not products: return
     
     any_import = any(p["is_import"] for p in products)
+    table_text = "🌍 **INTERNATIONALE IMPORT-ANALYSE**\n\n| Herkunft | Produktmodell | Euro (€) | Lira (TL) |\n| :--- | :--- | :--- | :--- |\n" if any_import else "🛍️ **LOKALER MARKTPLATZ-BROKER (RADIUS-GEPRÜFT)**\n\n| Herkunft | Produktmodell | Preis (€) | Distanz |\n| :--- | :--- | :--- | :--- |\n"
     
-    if any_import:
-        table_text = "🌍 **INTERNATIONALE IMPORT-ANALYSE**\n\n| Herkunft | Produktmodell | Euro (€) | Lira (TL) |\n| :--- | :--- | :--- | :--- |\n"
-        for p in products:
-            table_text += f"| [{p['platform']}] | {p['title']} | {p['price_eur']} € | {p['price_tl']} TL |\n"
-    else:
-        table_text = "🛍️ **LOKALER MARKTPLATZ-BROKER (RADIUS-GEPRÜFT)**\n\n| Herkunft | Produktmodell | Preis (€) | Distanz |\n| :--- | :--- | :--- | :--- |\n"
-        for p in products:
-            table_text += f"| [{p['platform']}] | {p['title']} | {p['price_eur']} € | {p['distance_km']} km ✅ |\n"
+    for p in products:
+        if any_import: table_text += f"| [{p['platform']}] | {p['title']} | {p['price_eur']} € | {p['price_tl']} TL |\n"
+        else: table_text += f"| [{p['platform']}] | {p['title']} | {p['price_eur']} € | {p['distance_km']} km ✅ |\n"
         
     buttons = [[{"text": f"📦 [{p['platform']}] Analysieren", "callback_data": f"buy_{user_key}_{p['id']}"}] for p in products]
-    
     nav_row = []
     if page > 0: nav_row.append({"text": "◀️ Zurück", "callback_data": f"page_{user_key}_{page-1}"})
     nav_row.append({"text": f"📄 Seite {page+1}", "callback_data": "ignore"})
-    if end_idx < len(pool): nav_row.append({"text": "Weiter ▶️", "callback_data": f"page_{user_key}_{page+1}"})
+    if (page + 1) * 3 < len(pool): nav_row.append({"text": "Weiter ▶️", "callback_data": f"page_{user_key}_{page+1}"})
     buttons.append(nav_row)
     
     markup = {"inline_keyboard": buttons}
-    
     if edit_id:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-        requests.post(url, json={"chat_id": chat_id, "message_id": edit_id, "text": table_text, "parse_mode": "Markdown", "reply_markup": markup})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": edit_id, "text": table_text, "parse_mode": "Markdown", "reply_markup": markup})
     else:
-        try:
-            url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            requests.post(url_photo, json={"chat_id": chat_id, "photo": products[0]["img"], "caption": "Aktuelle Treffer im Netzwerk."})
+        try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", json={"chat_id": chat_id, "photo": products[0]["img"], "caption": "Aktuelle Treffer im Netzwerk."})
         except: pass
-        url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url_msg, json={"chat_id": chat_id, "text": table_text, "parse_mode": "Markdown", "reply_markup": markup})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": table_text, "parse_mode": "Markdown", "reply_markup": markup})
 
 def process_message_async(chat_id, user_text, loading_msg_id):
     try:
-        u_low = user_text.lower()
+        u_low, url_edit = user_text.lower(), f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
         save_message(chat_id, "user", user_text)
-        url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
 
-        # Code-Änderung Freigabe
         if chat_id in pending_code_updates:
             if has_required_prefix(user_text) and any(k in u_low for k in ["ja", "ok", "bestätig", "hochladen"]):
                 requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "⚙️ Lade Code auf GitHub hoch..."})
@@ -329,7 +308,12 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             else:
                 del pending_code_updates[chat_id]
 
-        messages = [{"role": "system", "content": "Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. Nutze update_github_code für Code-Änderungen."}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
+        system_prompt = (
+            "Du bist 'KI Sekretär', ein autonomer KI-Entwickler-Broker. "
+            "STRIKTE REGEL: Wenn du Code änderst, musst du zwingend das Tool update_github_code verwenden. "
+            "Lösche niemals essenzielle Funktionen, das Sicherheits-Präfix oder die Admin-Logik!"
+        )
+        messages = [{"role": "system", "content": system_prompt}] + get_history(chat_id) + [{"role": "user", "content": user_text}]
         msg_obj, used_model = call_groq_text(messages)
         
         if hasattr(msg_obj, "tool_calls") and msg_obj.tool_calls:
@@ -349,7 +333,6 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply})
             return
 
-        # Marktplatzsuche & Matching ausführen
         platform_filter = "all"
         if "trendyol" in u_low: platform_filter = "trendyol"
         elif "amazon" in u_low: platform_filter = "amazon"
@@ -357,12 +340,9 @@ def process_message_async(chat_id, user_text, loading_msg_id):
         elif "kleinanzeigen" in u_low: platform_filter = "kleinanzeigen"
         
         clean_keyword = user_text.replace("suche", "").strip() or "jacke"
-        
-        # In DB Demand speichern fürs Hintergrund-Matching
         save_demand(chat_id, clean_keyword, "Gelsenkirchen", 150.0)
         
         live_products = fetch_live_marketplace_data(clean_keyword, platform_filter, user_location="Gelsenkirchen", max_radius_km=20)
-        
         if live_products:
             user_key = f"{chat_id}_{int(time.time())}"
             user_live_searches[user_key] = live_products
@@ -370,38 +350,30 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             send_shopping_page(chat_id, user_key, page=0)
             return
 
-        # Admin-Kurzhinweis für dich als Admin hinzufügen
         if str(chat_id) == ADMIN_USER_ID:
-            bot_reply += f"\n\n--- [ADMIN-INFO] ---\n🤖 KI: {used_model} | Status: OK"
+            bot_reply += f"\n\n--- [ADMIN-INFO] ---\n🤖 KI: {used_model} | Integrität: 🛡️ Geschützt"
 
         requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": bot_reply, "parse_mode": "Markdown"})
     except Exception as e:
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Fehler: {str(e)}"})
+        try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Fehler: {str(e)}"})
         except: pass
 
 def handle_callback_query(callback_data, chat_id, message_id):
     if callback_data.startswith("page_"):
         parts = callback_data.split("_")
         send_shopping_page(chat_id, f"{parts[1]}_{parts[2]}", page=int(parts[3]), edit_id=message_id)
-        
     elif callback_data.startswith("buy_"):
         parts = callback_data.split("_")
-        user_key = f"{parts[1]}_{parts[2]}"
-        prod_id = int(parts[3])
-        pool = user_live_searches.get(user_key, [])
-        prod = next((p for p in pool if p["id"] == prod_id), None)
+        pool = user_live_searches.get(f"{parts[1]}_{parts[2]}", [])
+        prod = next((p for p in pool if p["id"] == int(parts[3])), None)
         if not prod: return
         
         url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         requests.post(url_msg, json={"chat_id": chat_id, "text": f"🕵️‍♂️ Analysiere '{prod['title']}'..."})
-        
-        messages = [{"role": "system", "content": "Du bist 'KI Sekretär'."}, {"role": "user", "content": f"Analysiere Deal: {prod['title']} für {prod['price_eur']}€"}]
-        bot_reply, used_model = call_premium_ai(messages, provider="groq")
+        bot_reply, used_model = call_premium_ai([{"role": "system", "content": "Du bist 'KI Sekretär'."}, {"role": "user", "content": f"Analysiere Deal: {prod['title']} für {prod['price_eur']}€"}], provider="groq")
         
         if str(chat_id) == ADMIN_USER_ID:
             bot_reply += f"\n\n--- [ADMIN-INFO] ---\n🤖 {used_model}"
-            
         requests.post(url_msg, json={"chat_id": chat_id, "text": bot_reply})
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
