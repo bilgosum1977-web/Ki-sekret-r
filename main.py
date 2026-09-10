@@ -208,43 +208,27 @@ ai_tools = [
 ]
 
 
-# --- ROBUSTE APIFY & SCRAPING ENGINE ---
+# --- SCHLÜSSELFERTIGER APIFY-RUN FIX ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
-        print("❌ APIFY_TOKEN ist leer oder nicht gesetzt!")
-        return {}, 0.0
+        raise RuntimeError("APIFY_TOKEN ist leer – bitte eintragen.")
 
-    actor_id = APIFY_ACTORS.get(source_key, "apify/google-shopping-scraper")
+    actor_id = APIFY_ACTORS[source_key]
     url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync?token={APIFY_TOKEN}"
-    
+
     payload = {
-        "queries": [query],
-        "searchString": query,
-        "maxItems": 5
+        "search": query,   # WICHTIG: Apify erwartet 'search', nicht 'query'
+        "maxItems": 20
     }
 
-    try:
-        print(f"🔄 Starte Apify Actor {actor_id} für Abfrage: '{query}'")
-        r = requests.post(url, json=payload, timeout=45)
-        
-        if r.status_code != 200:
-            print(f"❌ Apify HTTP-Fehler {r.status_code}: {r.text[:300]}")
-            return {}, 0.0
-            
-        data = r.json()
-        usage = data.get("data", {}).get("usage", {}) or data.get("usage", {})
-        usd = float(usage.get("totalUsd", 0.0))
-        items = data.get("data", {}).get("items") or data.get("items") or data
-        
-        if not items or not isinstance(items, list):
-            print(f"⚠️ Apify hat keine gültigen Items zurückgeliefert: {str(data)[:200]}")
-            return {}, usd
-            
-        print(f"✅ Erfolgreich {len(items)} Items von Apify ({source_key}) geladen.")
-        return {"items": items}, usd
-    except Exception as e:
-        print(f"⚠️ Ausnahmefehler bei Apify-Quelle {source_key}: {e}")
-        return {}, 0.0
+    r = requests.post(url, json=payload)
+    r.raise_for_status()
+    data = r.json()
+
+    usage = data.get("usage", {})
+    usd = float(usage.get("totalUsd", 0.0))
+
+    return data, usd
 
 def search_searxng(query: str):
     url = f"{SEARXNG_URL}/search?q={query}&format=json"
