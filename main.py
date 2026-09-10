@@ -264,10 +264,7 @@ def search_ddgs(query: str):
         return None
 
 
-###############################################
-# DISPATCHER – PRODUKT-PRIORISIERT (SCHLÜSSELFERTIG)
-###############################################
-
+# --- NEUER PRODUKT-PRIORISIERTER DISPATCHER ---
 def is_product_query(query: str) -> bool:
     """
     Sehr einfache Produkt-Erkennung.
@@ -300,10 +297,6 @@ def dispatcher(query: str, user_id: str):
             apify_cost_eur = round(apify_cost_usd, 4)
             final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
 
-            items = apify_data.get("items", [])
-            if not items:
-                continue
-
             # Free-User → Zustimmung nötig
             if user_level == "free":
                 return {
@@ -312,7 +305,7 @@ def dispatcher(query: str, user_id: str):
                     "source": src,
                     "cost_admin": apify_cost_eur,
                     "cost_user": final_price_for_user,
-                    "results_preview": items,
+                    "results_preview": apify_data.get("items", apify_data),
                     "message": (
                         f"Für diese Produktsuche wird Apify benötigt.\n"
                         f"Admin-Kosten: {apify_cost_eur} €\n"
@@ -328,7 +321,7 @@ def dispatcher(query: str, user_id: str):
                 "source": src,
                 "cost_admin": apify_cost_eur,
                 "cost_user": final_price_for_user,
-                "results": items,
+                "results": apify_data.get("items", apify_data),
                 "message": (
                     f"Kostenpflichtige Quelle {src} genutzt.\n"
                     f"Admin-Kosten: {apify_cost_eur} €\n"
