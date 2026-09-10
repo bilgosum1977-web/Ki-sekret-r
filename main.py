@@ -88,7 +88,6 @@ def validate_code_integrity(new_content: str) -> tuple[bool, str]:
 
 # --- GITHUB UPDATE TOOL (SICHERER VORSCHAU-MODUS MIT SCHUTZ) ---
 def update_github_code(file_path, new_content, commit_message, chat_id):
-    # Integritätsprüfung durchführen, bevor die Vorschau generiert wird
     is_valid, error_reason = validate_code_integrity(new_content)
     if not is_valid:
         return (
