@@ -208,19 +208,20 @@ ai_tools = [
 ]
 
 
-# --- APIFY RUN FUNKTION (UNIVERSELL) ---
+# --- APIFY RUN FUNKTION ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte eintragen.")
 
     actor_id = APIFY_ACTORS[source_key]
-    url = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/run-sync?token={APIFY_TOKEN}"
+    formatted_actor_id = actor_id.replace('/', '~')
+    url = f"https://api.apify.com/v2/acts/{formatted_actor_id}/run-sync?token={APIFY_TOKEN}"
 
     payload = {
         "search": query,
         "keyword": query,
         "queries": [query],
-        "maxItems": 10
+        "maxItems": 20
     }
 
     r = requests.post(url, json=payload)
@@ -302,7 +303,7 @@ def dispatcher(query: str, user_id: str):
                     ),
                 }
             except Exception as e:
-                print(f"Fehler bei {src}: {e}")
+                print(f"CRITICAL APIFY ERROR ({src}): {str(e)}")
                 continue
 
     searxng_res = search_searxng(query)
