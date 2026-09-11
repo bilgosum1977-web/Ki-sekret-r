@@ -199,7 +199,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY RUN FUNKTION (Mit korrigiertem eBay Payload & Timeout) ---
+# --- APIFY RUN FUNKTION (Mit 35s Timeout & sicherem JSON-Handling) ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte in Render eintragen.")
@@ -222,18 +222,23 @@ def run_apify(source_key: str, query: str):
             "queries": [query],
             "maxPagesPerQuery": 1
         }
-    else:  # eBay (automation-lab/ebay-scraper) - Korrigiert auf searchQueries
+    else:  # eBay
         payload = {
             "searchQueries": [query],
             "maxItems": 10
         }
 
-    r = requests.post(url, json=payload, timeout=10)
+    # Timeout auf 35 Sekunden erhöht, damit der Scraper in Ruhe durchlaufen kann
+    r = requests.post(url, json=payload, timeout=35)
     
     if r.status_code not in [200, 201]:
         raise RuntimeError(f"Apify HTTP {r.status_code}: {r.text[:300]}")
         
-    data = r.json()
+    try:
+        data = r.json()
+    except Exception as json_err:
+        raise RuntimeError(f"Apify ungültige Antwort (kein JSON): {r.text[:300]}") from json_err
+
     usage = data.get("usage", {})
     usd = float(usage.get("totalUsd", 0.0))
 
@@ -324,7 +329,7 @@ def dispatcher(query: str, user_id: str):
             "cost_admin": 0.0,
             "cost_user": 0.0,
             "results": {"searxng": searxng_res, "ddgs": ddgs_res},
-            "message": f"⚠️ **Apify Timeout/Fehler, Fallback aktiv!**\n\nDetails:\n{error_details}",
+            "message": f"⚠️ **Apify Fehler, Fallback aktiv!**\n\nDetails:\n{error_details}",
         }
 
     return {
