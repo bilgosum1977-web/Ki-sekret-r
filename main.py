@@ -38,7 +38,7 @@ MAX_HISTORY_LENGTH = 15
 DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 pending_code_updates = {}
 
-# --- APIFY ACTORS (Deine exakten Favoriten) ---
+# --- APIFY ACTORS ---
 APIFY_ACTORS = {
     "apify_amazon": "junglee/free-amazon-product-scraper",
     "apify_google": "scraperlink/google-search-results-serp-scraper",
@@ -199,7 +199,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY RUN FUNKTION (Mit angepassten Payloads für deine Actors) ---
+# --- APIFY RUN FUNKTION (Mit strengem 10-Sekunden-Timeout) ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte in Render eintragen.")
@@ -211,25 +211,25 @@ def run_apify(source_key: str, query: str):
     formatted_actor_id = actor_id.replace('/', '~')
     url = f"https://api.apify.com/v2/acts/{formatted_actor_id}/run-sync?token={APIFY_TOKEN}"
 
-    # Spezifische Payloads für deine ausgewählten Actors
     if source_key == "apify_amazon":
         payload = {
             "categoryOrProductUrls": [f"https://www.amazon.de/s?k={query}"],
-            "maxItemsPerStartUrl": 20,
-            "scrapeProductDetails": True
+            "maxItemsPerStartUrl": 10,
+            "scrapeProductDetails": False
         }
     elif source_key == "apify_google":
         payload = {
             "queries": [query],
             "maxPagesPerQuery": 1
         }
-    else:  # eBay (automation-lab/ebay-scraper)
+    else:
         payload = {
             "search": query,
-            "maxItems": 20
+            "maxItems": 10
         }
 
-    r = requests.post(url, json=payload, timeout=60)
+    # Strenger Timeout von 10 Sekunden, damit der Bot blitzschnell reagiert
+    r = requests.post(url, json=payload, timeout=10)
     
     if r.status_code not in [200, 201]:
         raise RuntimeError(f"Apify HTTP {r.status_code}: {r.text[:300]}")
@@ -278,7 +278,8 @@ def dispatcher(query: str, user_id: str):
     apify_errors = []
 
     if is_product_query(query):
-        for src in ["apify_amazon", "apify_google", "apify_ebay"]:
+        # Wir versuchen nur kurz den eBay oder Google Scraper, um Endlos-Schleifen zu vermeiden
+        for src in ["apify_ebay", "apify_google"]:
             try:
                 apify_data, apify_cost_usd = run_apify(src, query)
                 apify_cost_eur = round(apify_cost_usd, 4)
@@ -313,10 +314,10 @@ def dispatcher(query: str, user_id: str):
                 print(f"CRITICAL APIFY ERROR ({src}): {err_str}")
                 apify_errors.append(f"{src}: {err_str}")
 
-    # Fallback, falls Apify scheitert
+    # Fallback greift jetzt sofort nach max. 10 Sekunden Timeout
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
-    error_details = "\n".join(apify_errors) if apify_errors else "Unbekannter Fehler"
+    error_details = "\n".join(apify_errors) if apify_errors else "Timeout / Unbekannter Fehler"
 
     if searxng_res or ddgs_res:
         return {
@@ -326,7 +327,7 @@ def dispatcher(query: str, user_id: str):
             "cost_admin": 0.0,
             "cost_user": 0.0,
             "results": {"searxng": searxng_res, "ddgs": ddgs_res},
-            "message": f"⚠️ **Apify fehlgeschlagen, Fallback aktiv!**\n\nDetails:\n{error_details}",
+            "message": f"⚠️ **Apify Timeout/Fehler, Fallback aktiv!**\n\nDetails:\n{error_details}",
         }
 
     return {
