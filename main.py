@@ -34,8 +34,6 @@ REQUIRED_PREFIX = "+×÷edi99"
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-INITIAL_BALANCE = 10000
-MAX_HISTORY_LENGTH = 15
 DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 pending_code_updates = {}
 
@@ -169,7 +167,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- ASYNCHRONER APIFY ACTOR MIT POLLING ---
+# --- ASYNCHRONER APIFY ACTOR MIT POLLING (KORRIGIERTE ENDPUNKTE) ---
 def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scraper"):
     if not APIFY_TOKEN:
         return None
@@ -195,7 +193,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
         if not run_id or not dataset_id:
             return None
 
-        # Status-Polling (Max. 60 Sekunden warten, alle 5 Sekunden prüfen)
+        # Korrigierter Status-Polling Endpunkt
         status_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
         
         for _ in range(12):
@@ -206,17 +204,20 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
             run_status = status_response.json().get("data", {}).get("status")
             
             if run_status == "SUCCEEDED":
+                # Korrigierter Dataset Endpunkt
                 dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={APIFY_TOKEN}"
                 data_response = requests.get(dataset_url, timeout=15)
                 data_response.raise_for_status()
                 return data_response.json()
                 
             elif run_status in ["FAILED", "ABORTED", "TIMED-OUT"]:
+                print(f"⚠️ Apify Actor {actor_id} abgebrochen. Status: {run_status}.")
                 return None
                 
+        print(f"⏱️ Apify Timeout für Actor {actor_id}.")
         return None
     except Exception as e:
-        print(f"Apify Polling Fehler: {e}")
+        print(f"❌ Apify Polling Fehler: {e}")
         return None
 
 
@@ -240,9 +241,9 @@ def search_ddgs(query: str):
         return None
 
 
-# --- SMART DISPATCHER (Zuerst kostenlos, dann Fallback via Apify) ---
-def dispatcher(query: str, user_id: str):
-    # 1. Bevorzuge IMMER zuerst kostenlose Quellen (Parallel)
+# --- SMART DISPATCHER MIT KOSTENSTEUERUNG ---
+def dispatcher(query: str, user_id: str, is_shopping: bool = False):
+    # 1. Kostenlose Web-Quellen parallel abfragen
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         future_searxng = executor.submit(search_searxng, query)
         future_ddgs = executor.submit(search_ddgs, query)
@@ -251,10 +252,10 @@ def dispatcher(query: str, user_id: str):
         ddgs_res = future_ddgs.result()
 
     response_lines = [f"🔍 **Suchergebnisse für:** *{query}*\n"]
-    has_results = False
+    has_web_results = False
 
     if searxng_res:
-        has_results = True
+        has_web_results = True
         response_lines.append("🌐 **SearXNG Treffer (Kostenlos):**")
         for item in searxng_res[:3]:
             title = item.get("title", "Kein Titel")
@@ -263,7 +264,7 @@ def dispatcher(query: str, user_id: str):
         response_lines.append("")
 
     if ddgs_res:
-        has_results = True
+        has_web_results = True
         response_lines.append("🦆 **DuckDuckGo Treffer (Kostenlos):**")
         for item in ddgs_res[:3]:
             title = item.get("title", "Kein Titel")
@@ -272,78 +273,83 @@ def dispatcher(query: str, user_id: str):
             response_lines.append(f"• [{title}]({link})\n  _{body[:80]}..._")
         response_lines.append("")
 
-    if has_results:
-        return "\n".join(response_lines)
+    # 2. Apify-Shopping-Scraper NUR bei echtem Shopping-Intent starten
+    apify_lines = []
+    found_any_apify = False
 
-    # 2. Fallback: Wenn Web-Suche leer bleibt, Apify Amazon Scraper nutzen
-    try:
-        apify_data = run_apify_actor(query)
-        if apify_data and isinstance(apify_data, list):
-            apify_lines = [f"🛒 **Amazon-Ergebnisse (Fallback):** *{query}*\n"]
-            for item in apify_data[:5]:
+    if is_shopping:
+        actor_id_1 = "junglee~free-amazon-product-scraper"
+        actor_id_2 = "automation-lab~ebay-scraper"
+
+        print(f"🛒 Shopping-Intent erkannt. Starte Apify-Actors für: {query}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as apify_executor:
+            future_apify_1 = apify_executor.submit(run_apify_actor, query, actor_id_1)
+            future_apify_2 = apify_executor.submit(run_apify_actor, query, actor_id_2)
+            
+            data_1 = future_apify_1.result()
+            data_2 = future_apify_2.result()
+
+        # Auswertung Amazon
+        if data_1 and isinstance(data_1, list):
+            found_any_apify = True
+            apify_lines.append("📦 **Amazon Angebote:**")
+            for item in data_1[:3]:
                 title = item.get("title", "Produkt")
-                price = item.get("price", {}).get("display", item.get("price", "Preis auf Anfrage"))
+                price_data = item.get("price")
+                price = price_data.get("display") if isinstance(price_data, dict) else price_data
+                if not price:
+                    price = "Preis auf Anfrage"
                 link = item.get("url", "#")
-                apify_lines.append(f"• **{title}**\n  💰 Preis: {price}\n  🔗 [Zum Angebot]({link})\n")
-            return "\n".join(apify_lines)
-    except Exception as e:
-        print(f"Apify Fallback Fehler: {e}")
+                apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
+            apify_lines.append("")
+
+        # Auswertung eBay
+        if data_2 and isinstance(data_2, list):
+            found_any_apify = True
+            apify_lines.append("🛒 **eBay Angebote:**")
+            for item in data_2[:3]:
+                title = item.get("title", "Produkt")
+                price = item.get("price", "Preis auf Anfrage")
+                link = item.get("url", "#")
+                apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
+            apify_lines.append("")
+    else:
+        print(f"🍃 Normaler Info-Request für '{query}'. Apify übersprungen.")
+
+    # 3. Ergebnisse kombinieren
+    if found_any_apify:
+        response_lines.extend(apify_lines)
+        return "\n".join(response_lines)
+    elif has_web_results:
+        if is_shopping:
+            response_lines.append("⚠️ _Produktdaten von Amazon/eBay sind gerade nicht verfügbar._")
+        return "\n".join(response_lines)
 
     return "❌ Keine Ergebnisse gefunden."
 
 
-# --- ASYNC MESSAGE PROCESSOR ---
-def process_message_async(chat_id: str, user_text: str, loading_msg_id: int):
+# --- ASYNCHRONER PROZESSOR ---
+def process_message_async(chat_id, query, message_id, is_shopping):
     try:
-        u_low = user_text.lower()
-        url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-        save_message(chat_id, "user", user_text)
-
-        if str(chat_id) in pending_code_updates:
-            if has_required_prefix(user_text) and any(k in u_low for k in ["ja", "ok", "bestätig", "hochladen"]):
-                requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "⚙️ Lade Code auf GitHub hoch..."})
-                result_msg = execute_final_github_update(chat_id)
-                requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": result_msg})
-                return
-            else:
-                del pending_code_updates[str(chat_id)]
-
-        greetings = ["hallo", "hi", "guten morgen", "guten tag", "moin", "servus", "hey"]
-        if any(g in u_low for g in greetings):
-            requests.post(
-                url_edit,
-                json={
-                    "chat_id": chat_id,
-                    "message_id": loading_msg_id,
-                    "text": "Guten Tag! Ich durchsuche das Web und Amazon nach Produkten für dich."
-                }
-            )
-            return
-
-        bot_reply = dispatcher(user_text, chat_id)
-
+        result_text = dispatcher(query, chat_id, is_shopping)
+        
+        # Korrigierte Telegram API URL mit /bot<TOKEN>/
         requests.post(
-            url_edit,
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
             json={
                 "chat_id": chat_id,
-                "message_id": loading_msg_id,
-                "text": bot_reply,
+                "message_id": message_id,
+                "text": result_text,
                 "parse_mode": "Markdown",
                 "disable_web_page_preview": True
             }
         )
     except Exception as e:
-        print(f"Error in process_message_async: {e}")
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
-                json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Ein Fehler ist aufgetreten: {str(e)}"}
-            )
-        except Exception:
-            pass
+        print(f"Fehler in process_message_async: {e}")
 
 
-# --- FLASK WEBHOOK & SERVER ---
+# --- FLASK WEBHOOK MIT INTENT-ERKENNUNG ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 @app.route("/webhook", methods=["POST"])
@@ -356,16 +362,26 @@ def webhook():
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
-            text = msg.get("text", msg.get("caption", ""))
-            if text:
+            raw_text = msg.get("text", msg.get("caption", ""))
+            
+            if raw_text:
+                clean_query = raw_text.strip()
+                is_shopping = False
+                
+                # Präfix "suche " prüfen und case-insensitive entfernen
+                if clean_query.lower().startswith("suche "):
+                    clean_query = clean_query[6:].strip()
+                    is_shopping = True  # Shopping-Intent Flag aktivieren
+
+                # Korrigierte Telegram API URL mit /bot<TOKEN>/
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": "⏳ Suche läuft..."}
+                    json={"chat_id": chat_id, "text": f"⏳ Suche nach: *{clean_query}*...", "parse_mode": "Markdown"}
                 ).json()
                 
                 lid = res.get("result", {}).get("message_id")
                 if lid:
-                    executor.submit(process_message_async, chat_id, text, lid)
+                    executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping)
     except Exception as e:
         print(f"Webhook error: {e}")
     return "OK", 200
