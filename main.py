@@ -199,7 +199,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY RUN FUNKTION (Mit strengem 10-Sekunden-Timeout) ---
+# --- APIFY RUN FUNKTION (Mit korrigiertem eBay Payload & Timeout) ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte in Render eintragen.")
@@ -222,13 +222,12 @@ def run_apify(source_key: str, query: str):
             "queries": [query],
             "maxPagesPerQuery": 1
         }
-    else:
+    else:  # eBay (automation-lab/ebay-scraper) - Korrigiert auf searchQueries
         payload = {
-            "search": query,
+            "searchQueries": [query],
             "maxItems": 10
         }
 
-    # Strenger Timeout von 10 Sekunden, damit der Bot blitzschnell reagiert
     r = requests.post(url, json=payload, timeout=10)
     
     if r.status_code not in [200, 201]:
@@ -278,7 +277,6 @@ def dispatcher(query: str, user_id: str):
     apify_errors = []
 
     if is_product_query(query):
-        # Wir versuchen nur kurz den eBay oder Google Scraper, um Endlos-Schleifen zu vermeiden
         for src in ["apify_ebay", "apify_google"]:
             try:
                 apify_data, apify_cost_usd = run_apify(src, query)
@@ -314,7 +312,6 @@ def dispatcher(query: str, user_id: str):
                 print(f"CRITICAL APIFY ERROR ({src}): {err_str}")
                 apify_errors.append(f"{src}: {err_str}")
 
-    # Fallback greift jetzt sofort nach max. 10 Sekunden Timeout
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
     error_details = "\n".join(apify_errors) if apify_errors else "Timeout / Unbekannter Fehler"
