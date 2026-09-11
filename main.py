@@ -167,7 +167,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY POLLING MIT PRÄZISER PAYLOAD & AUTH-HEADERN ---
+# --- APIFY POLLING MIT BEREINIGTER PAYLOAD & AUTH-HEADERN ---
 def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scraper"):
     if not APIFY_TOKEN:
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
@@ -180,7 +180,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
         "Content-Type": "application/json"
     }
 
-    # Standard-Basis-Payload (gilt für generische Scraper)
+    # Standard-Basis-Payload
     payload = {
         "maxItems": 5,
         "proxyConfiguration": {
@@ -188,17 +188,14 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
         }
     }
     
-    # Exakte und strikte Zuweisung nach offiziellen Actor-Eingabeschemata
     actor_id_lower = actor_id.lower()
     
     if "ebay" in actor_id_lower:
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE" 
     elif "amazon" in actor_id_lower:
-        encoded_query = requests.utils.quote(query)
-        payload["categoryOrProductUrls"] = [
-            {"url": f"https://amazon.de{encoded_query}"}
-        ]
+        # Korrektur für junglee~free-amazon-product-scraper:
+        payload["queries"] = query
     elif "google" in actor_id_lower:
         payload["queries"] = query
     else:
