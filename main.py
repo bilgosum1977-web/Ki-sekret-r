@@ -152,60 +152,31 @@ def speichere_produkte(kategorie, data, shop):
         cursor = conn.cursor()
         if data and isinstance(data, list):
             for item in data[:5]:
-                name = (
-                    item.get("title") or 
-                    item.get("name") or 
-                    "Produkt"
-                )
+                name = item.get("title") or item.get("name") or "Produkt"
                 
-                # FIX: Preis immer to Text machen
-                preis = (
-                    item.get("priceString") or
-                    item.get("price") or
-                    item.get("priceText") or
-                    "Auf Anfrage"
-                )
-                
-                # FIX: Egal ob Zahl oder Dict
-                if isinstance(preis, dict):
+                raw_preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
+                if isinstance(raw_preis, dict):
                     preis = (
-                        preis.get("display") or
-                        preis.get("value") or
+                        raw_preis.get("display") or 
+                        raw_preis.get("value") or 
+                        raw_preis.get("raw") or 
                         "Auf Anfrage"
                     )
-                
-                # FIX: Zahl zu Text umwandeln
-                preis = str(preis)
-                
-                # EUR hinzufügen wenn nötig
-                if (preis != "Auf Anfrage" and 
-                    "€" not in preis and 
-                    "EUR" not in preis):
-                    preis = f"EUR {preis}"
-                
-                url = (
-                    item.get("url") or
-                    item.get("link") or
-                    "#"
-                )
-                
+                    preis = str(preis)
+                else:
+                    preis = str(raw_preis)
+                    
+                url = item.get("url") or item.get("link") or "#"
                 cursor.execute('''
                     INSERT INTO produkte
-                    (kategorie, name, 
-                     preis, url, shop)
+                    (kategorie, name, preis, url, shop)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    kategorie, 
-                    name, 
-                    preis,  # Jetzt immer Text ✅
-                    url, 
-                    shop
-                ))
+                ''', (kategorie, name, preis, url, shop))
         conn.commit()
         conn.close()
         print(f"✅ Produkte gespeichert!")
     except Exception as e:
-        print(f"❌ Fehler: {e}", flush=True)
+        print(f"❌ Fehler beim Speichern: {e}", flush=True)
 
 init_produkte_db()
 
@@ -387,9 +358,15 @@ def process_platform_results(data, platform_name):
                 
                 raw_price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
                 if isinstance(raw_price, dict):
-                    price = raw_price.get("display") or raw_price.get("value") or raw_price.get("raw") or "Auf Anfrage"
+                    price = (
+                        raw_price.get("display") or 
+                        raw_price.get("value") or 
+                        raw_price.get("raw") or 
+                        "Auf Anfrage"
+                    )
+                    price = str(price)  # ← Hier wird der Dict-Wert sicher zum String!
                 else:
-                    price = str(raw_price)
+                    price = str(raw_price)  # ✅ bereits ok
 
                 if price != "Auf Anfrage" and "EUR" not in price and "€" not in price:
                     price = f"EUR {price}"
