@@ -411,7 +411,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
             pass
 
 
-# --- FLASK WEBHOOK MIT GET/POST TEST-MODUS ---
+# --- FLASK WEBHOOK MIT GET/POST TEST-MODUS & FUZZY MATCHING ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 @app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
@@ -435,10 +435,17 @@ def webhook():
                 clean_query = raw_text.strip()
                 is_shopping = False
                 
-                if clean_query.lower().startswith("suche "):
-                    clean_query = clean_query[6:].strip()
-                    is_shopping = True
+                # --- FEHLERTOLERANTE ERKENNUNG (Fuzzy-Matching) ---
+                lower_text = clean_query.lower()
+                search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen "]
+                
+                for prefix in search_prefixes:
+                    if lower_text.startswith(prefix):
+                        clean_query = clean_query[len(prefix):].strip()
+                        is_shopping = True
+                        break
 
+                # Infotext an Telegram senden
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": f"⏳ Suche nach: *{clean_query}*...", "parse_mode": "Markdown"}
@@ -456,7 +463,5 @@ def ping():
     return "Bot is alive!", 200
 
 if __name__ == "__main__":
-    # Holt den Port dynamisch von Render (standardmäßig 10000)
     port = int(os.environ.get("PORT", 10000))
-    # Startet die App auf 0.0.0.0, damit sie von außen erreichbar ist
     app.run(host="0.0.0.0", port=port, debug=False)
