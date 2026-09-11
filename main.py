@@ -15,7 +15,16 @@ from email.mime.text import MIMEText
 from flask import Flask, request
 import requests
 from groq import Groq
-from duckduckgo_search import DDGS
+
+# Sicherer Import für DuckDuckGo Search (ddgs)
+try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
+
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
 
@@ -243,6 +252,8 @@ def search_searxng(query: str):
         return None
 
 def search_ddgs(query: str):
+    if not DDGS:
+        return None
     try:
         with DDGS(timeout=5) as ddgs:
             results = list(ddgs.text(f"{query} preis kaufen", max_results=5))
