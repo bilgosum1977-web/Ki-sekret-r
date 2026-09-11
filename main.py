@@ -192,8 +192,9 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE"
     elif "amazon" in actor_id_lower:
-        # KORREKTUR FÜR JUNGLEE: Er erwartet "queries" als Liste oder String statt searchKeywords
-        payload["queries"] = [query] if not isinstance(query, list) else query
+        # EXAKTER KEY FÜR junglee/amazon-crawler: Er verlangt das Feld "search"
+        payload["search"] = query
+        payload["locationCode"] = "de"
     else:
         payload["search"] = query
 
@@ -245,23 +246,26 @@ def process_platform_results(data, platform_name):
     lines = []
     if data and isinstance(data, list):
         clean_items = [i for i in data if i.get("title") or i.get("name")]
+        
         if clean_items:
-            lines.append(f"📦 **{platform_name} Angebote:**")
+            lines.append(f"🔹 **{platform_name} Angebote:**")
             for item in clean_items[:3]:
-                title = item.get("title") or item.get("name") or "Produkt ohne Titel"
+                # Unterstützt verschiedene JSON-Strukturen für Amazon und eBay
+                title = item.get("title") or item.get("name") or "Produkt"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
                 
-                price = item.get("priceString") or item.get("price") or "Preis auf Anfrage"
+                # Preis-Fallback für unterschiedliche Scraper-Formate
+                price = item.get("priceString") or item.get("price") or item.get("price/value") or "Auf Anfrage"
                 if isinstance(price, dict):
-                    price = price.get("display") or price.get("value") or price.get("raw") or "Preis auf Anfrage"
+                    price = price.get("display") or price.get("value") or "Auf Anfrage"
                 else:
                     price = str(price)
 
                 link = item.get("url") or item.get("link") or item.get("href") or "#"
-                if link != "#" and link.startswith("/") and platform_name == "Amazon":
+                if link != "#" and link.startswith("/"):
                     link = f"https://amazon.de{link}"
                 
-                lines.append(f"• {title[:50]}...\n  💰 {price} | 🔗 [Zum Shop]({link})")
+                lines.append(f"• {title[:45]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
             lines.append("")
     return lines
 
