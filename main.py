@@ -159,6 +159,7 @@ def execute_final_github_update(chat_id: str) -> str:
             payload["sha"] = sha
             
         put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
+        # KORRIGIERT: Liste der Statuscodes hinzugefügt
         if put_res.status_code in [200, 201]:
             return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde auf GitHub aktualisiert."
         else:
@@ -242,16 +243,12 @@ def run_apify_actor(query: str, actor_id: str = "junglee/amazon-crawler"):
 # =====================================================================
 # UNIVERSELLER DATEN-PARSER (Für Amazon & eBay)
 # =====================================================================
-def process_amazon_results(data_1):
-    apify_lines = []
-    found_any_apify = False
-
-    if data_1 and isinstance(data_1, list):
-        clean_items = [i for i in data_1 if i.get("title") or i.get("name")]
+def process_platform_results(data, platform_name):
+    lines = []
+    if data and isinstance(data, list):
+        clean_items = [i for i in data if i.get("title") or i.get("name")]
         if clean_items:
-            found_any_apify = True
-            apify_lines.append("📦 **Angebote:**")
-            
+            lines.append(f"📦 **{platform_name} Angebote:**")
             for item in clean_items[:3]:
                 title = item.get("title") or item.get("name") or "Produkt ohne Titel"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
@@ -263,13 +260,17 @@ def process_amazon_results(data_1):
                     price = str(price)
 
                 link = item.get("url") or item.get("link") or item.get("href") or "#"
-                if link != "#" and link.startswith("/"):
+                if link != "#" and link.startswith("/") and platform_name == "Amazon":
                     link = f"https://amazon.de{link}"
                 
-                apify_lines.append(f"• {title[:50]}...\n  💰 {price} | 🔗 [Zum Shop]({link})")
-            apify_lines.append("")
-        
-    return "\n".join(apify_lines) if found_any_apify else "⚠️ Produktdaten von Amazon/eBay sind gerade nicht verfügbar."
+                lines.append(f"• {title[:50]}...\n  💰 {price} | 🔗 [Zum Shop]({link})")
+            lines.append("")
+    return lines
+
+
+def process_amazon_results(data_1):
+    res = process_platform_results(data_1, "Amazon")
+    return "\n".join(res) if res else "⚠️ Produktdaten von Amazon/eBay sind gerade nicht verfügbar."
 
 
 # =====================================================================
@@ -336,28 +337,45 @@ def send_telegram_message(chat_id, text, message_id=None):
         return False
 
 
-# --- ASYNCHRONER PROZESSOR ---
+# --- ASYNCHRONER PROZESSOR (KORRIGIERT AUF REINE KLEINSCHREIBUNG) ---
 def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
-        if query == "ja" and str(chat_id) == ADMIN_USER_ID:
-            nachricht = execute_final_github_update(chat_id)
-        elif is_shopping:
-            send_telegram_message(chat_id, f"⏳ Suche nach Produkten für: {query}...", message_id=message_id)
-            if "ebay" in query.lower():
-                rohdaten = run_apify_actor(query, "automation-lab/ebay-scraper")
+        if is_shopping:
+            send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
+            
+            # KORRIGIERT: junglee~amazon-crawler komplett in Kleinbuchstaben!
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
+                future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
+                future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
+                
+                amazon_data = future_amazon.result()
+                ebay_data = future_ebay.result()
+
+            final_lines = ["🛍️ **Dein Produkt-Vergleich:**\n"]
+            
+            amazon_lines = process_platform_results(amazon_data, "Amazon")
+            ebay_lines = process_platform_results(ebay_data, "eBay")
+            
+            final_lines.extend(amazon_lines)
+            final_lines.extend(ebay_lines)
+            
+            if len(final_lines) <= 1:
+                nachricht = "⚠️ Aktuell konnten weder auf Amazon noch auf eBay Angebote gefunden werden."
             else:
-                rohdaten = run_apify_actor(query, "junglee/amazon-crawler")
-            nachricht = process_amazon_results(rohdaten)
+                nachricht = "\n".join(final_lines)
         else:
             send_telegram_message(chat_id, f"🧠 Denk nach...", message_id=message_id)
-            nachricht = ask_groq(query)
+            if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+                nachricht = execute_final_github_update(chat_id)
+            else:
+                nachricht = ask_groq(query)
 
         send_telegram_message(chat_id, nachricht, message_id=message_id)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
-        send_telegram_message(chat_id, f"❌ Interner Fehler: {str(thread_error)}", message_id=message_id)
+        send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
 
 
 # --- FLASK WEBHOOK ---
