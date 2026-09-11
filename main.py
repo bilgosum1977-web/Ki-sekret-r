@@ -167,16 +167,19 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY POLLING MIT AKTUALISIERTEM AMAZON-CRAWLER ---
+# --- ABSOLUT STABILES APIFY POLLING (REPARIERTE URL-SYNTAX) ---
 def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
-    if not APIFY_TOKEN:
+    apify_token = os.getenv("APIFY_TOKEN")
+    if not apify_token:
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
 
-    url = f"https://api.apify.com/v2/acts/{actor_id}/runs?waitForFinish=0"
+    # URL-SYNTAX-REPARATUR: Tilde (~) zwingend durch Schrägstrich (/) ersetzen für die REST-API v2
+    clean_actor_id = actor_id.replace("~", "/")
+    url = f"https://api.apify.com/v2/acts/{clean_actor_id}/runs?waitForFinish=0"
 
     headers = {
-        "Authorization": f"Bearer {APIFY_TOKEN}",
+        "Authorization": f"Bearer {apify_token}",
         "Content-Type": "application/json"
     }
 
@@ -193,10 +196,11 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
     if "ebay" in actor_id_lower:
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE" 
+        
     elif "amazon" in actor_id_lower:
-        # Optimierung für den offiziellen 'apify/amazon-crawler'
         payload["searchKeywords"] = query
         payload["locationCode"] = "de"
+        
     elif "google" in actor_id_lower:
         payload["queries"] = query
     else:
@@ -301,7 +305,7 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
     found_any_apify = False
 
     if is_shopping:
-        actor_id_1 = "apify~amazon-crawler"  # <-- Neue offizielle ID eingetragen!
+        actor_id_1 = "apify~amazon-crawler"
         actor_id_2 = "automation-lab~ebay-scraper"
 
         print(f"🛒 Shopping-Intent erkannt. Starte Apify-Actors für: {query}")
@@ -430,7 +434,7 @@ def webhook():
                 
                 if clean_query.lower().startswith("suche "):
                     clean_query = clean_query[6:].strip()
-                    is_shopping = True  # Shopping-Intent Flag aktivieren
+                    is_shopping = True
 
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
