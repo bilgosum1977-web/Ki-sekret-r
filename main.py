@@ -33,7 +33,9 @@ REQUIRED_PREFIX = "+×÷edi99"
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
 
-INITIAL_BALANCE, MAX_HISTORY_LENGTH, DB_PATH = 10000, 15, os.getenv("DB_PATH", "bot_memory.db")
+INITIAL_BALANCE = 10000
+MAX_HISTORY_LENGTH = 15
+DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 pending_code_updates = {}
 
 # --- APIFY ACTORS ---
@@ -44,27 +46,62 @@ APIFY_ACTORS = {
 }
 
 
-# --- DATABASE ---
+# --- DATABASE INITIALIZATION & HELPERS ---
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS user_profile (user_id TEXT, fact_key TEXT, fact_value TEXT, PRIMARY KEY (user_id, fact_key))')
-    cursor.execute('CREATE TABLE IF NOT EXISTS marketplace_demand (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, title TEXT, location TEXT, max_price REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                role TEXT,
+                content TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_profile (
+                user_id TEXT,
+                fact_key TEXT,
+                fact_value TEXT,
+                PRIMARY KEY (user_id, fact_key)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS marketplace_demand (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                title TEXT,
+                location TEXT,
+                max_price REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Database Initialization Error: {e}")
 
 def save_message(user_id, role, content):
-    conn = sqlite3.connect(DB_PATH)
-    conn.cursor().execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)', (str(user_id), role, content))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)',
+            (str(user_id), role, content)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving message: {e}")
 
 init_db()
 
 
 # --- USER MODEL & COST LOGIC ---
 def get_user_level(user_id: str) -> str:
+    # Hier kann bei Bedarf die Logik für Pro/VIP-Nutzer erweitert werden
     return "free"
 
 def calculate_price_with_markup(base_cost: float, user_level: str) -> float:
@@ -73,7 +110,8 @@ def calculate_price_with_markup(base_cost: float, user_level: str) -> float:
         "pro": 1.5,
         "vip": 1.0,
     }
-    return round(base_cost * MARKUP.get(user_level, 2.0), 4)
+    multiplier = MARKUP.get(user_level, 2.0)
+    return round(base_cost * multiplier, 4)
 
 
 # --- CODE INTEGRITY & GITHUB UPDATES ---
@@ -90,62 +128,79 @@ def validate_code_integrity(new_content: str) -> tuple[bool, str]:
         "webhook",
         "ADMIN_USER_ID"
     ]
-    missing = [kw for kw in required_keywords if kw not in new_content]
-    if missing:
-        return False, f"Fehlende Pflicht-Komponenten: {', '.join(missing)}"
+    missing_keywords = [kw for kw in required_keywords if kw not in new_content]
+    if missing_keywords:
+        return False, f"Fehlende Pflicht-Komponenten: {', '.join(missing_keywords)}"
     return True, "OK"
 
-def update_github_code(file_path, new_content, commit_message, chat_id):
+def update_github_code(file_path: str, new_content: str, commit_message: str, chat_id: str) -> str:
     is_valid, error_reason = validate_code_integrity(new_content)
     if not is_valid:
-        return f"❌ **INTEGRITÄTS-ABWEHR AKTIVIERT**\nGrund: `{error_reason}`."
+        return f"❌ **INTEGRITÄTS-ABWEHR AKTIVIERT**\nGrund: `{error_reason}`. Update verweigert."
 
-    pending_code_updates[chat_id] = {
+    pending_code_updates[str(chat_id)] = {
         "file_path": file_path,
         "new_content": new_content,
         "commit_message": commit_message
     }
+    
     preview_snippet = new_content[:500] + ("\n... [Code ist länger] ..." if len(new_content) > 500 else "")
     return (
-        "🛡️ **SICHERHEITS-KONTROLLE**\n\n"
-        f"📁 **Datei:** `{file_path}`\n\n```python\n" + preview_snippet + "\n```\n\n"
-        f"👉 Antworte mit **`{REQUIRED_PREFIX} ja`**, um den Code hochzuladen."
+        "🛡️ **SICHERHEITS-KONTROLLE AKTIV**\n\n"
+        f"📁 **Ziel-Datei:** `{file_path}`\n"
+        f"💬 **Commit-Nachricht:** `{commit_message}`\n\n"
+        f"**Code-Vorschau:**\n```python\n{preview_snippet}\n```\n\n"
+        f"👉 Antworte jetzt mit **`{REQUIRED_PREFIX} ja`**, um den Code endgültig zu übertragen."
     )
 
-def execute_final_github_update(chat_id):
-    update_data = pending_code_updates.get(chat_id)
+def execute_final_github_update(chat_id: str) -> str:
+    update_data = pending_code_updates.get(str(chat_id))
     if not update_data:
-        return "❌ Es liegt keine ausstehende Code-Änderung vor."
+        return "❌ Es liegt keine ausstehende Code-Änderung für dich vor."
     
     file_path = update_data["file_path"]
     new_content = update_data["new_content"]
     commit_message = update_data["commit_message"]
-    del pending_code_updates[chat_id]
+    
+    # Direkt ausstehenden Eintrag löschen, um Replay-Angriffe zu verhindern
+    del pending_code_updates[str(chat_id)]
 
     token = os.getenv("GITHUB_TOKEN")
     repo = os.getenv("GITHUB_REPO")
+    
     if not token or not repo:
-        return "Fehler: GITHUB_TOKEN oder GITHUB_REPO nicht gesetzt."
+        return "❌ Fehler: `GITHUB_TOKEN` oder `GITHUB_REPO` sind nicht in den Umgebungsvariablen gesetzt."
         
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
     api_url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
     
     try:
+        # Bestehende Datei abrufen, um den aktuellen SHA-Wert zu erhalten
         get_res = requests.get(api_url, headers=headers, timeout=5)
-        sha = get_res.json().get("sha") if get_res.status_code == 200 else None
+        sha = None
+        if get_res.status_code == 200:
+            sha = get_res.json().get("sha")
+            
         encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
         
-        payload = {"message": commit_message, "content": encoded_content, "branch": "main"}
+        payload = {
+            "message": commit_message,
+            "content": encoded_content,
+            "branch": "main"
+        }
         if sha:
             payload["sha"] = sha
             
         put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
         if put_res.status_code in [200, 201]:
-            return f"✅ **Freigabe erfolgreich!** Datei `{file_path}` aktualisiert."
+            return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde auf GitHub aktualisiert."
         else:
-            return f"GitHub Fehler ({put_res.status_code}): {put_res.text[:200]}"
+            return f"❌ GitHub API Fehler ({put_res.status_code}): {put_res.text[:300]}"
     except Exception as e:
-        return f"Fehler beim Update: {str(e)}"
+        return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
 # --- APIFY RUN FUNKTION ---
@@ -153,7 +208,10 @@ def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte in Render eintragen.")
 
-    actor_id = APIFY_ACTORS[source_key]
+    actor_id = APIFY_ACTORS.get(source_key)
+    if not actor_id:
+        raise ValueError(f"Unbekannter Actor Key: {source_key}")
+        
     formatted_actor_id = actor_id.replace('/', '~')
     url = f"https://api.apify.com/v2/acts/{formatted_actor_id}/run-sync?token={APIFY_TOKEN}"
 
@@ -195,13 +253,13 @@ def search_ddgs(query: str):
         return None
 
 
-# --- DISPATCHER ---
+# --- DISPATCHER & INTENT RECOGNITION ---
 def is_product_query(query: str) -> bool:
     product_keywords = [
         "kaufen", "preis", "kosten", "produkt", "angebot",
         "airpods", "iphone", "samsung", "dyson", "ps5",
         "headset", "kopfhörer", "monitor", "tv", "fernseher",
-        "google shopping", "amazon", "ebay", "suche"
+        "google shopping", "amazon", "ebay", "suche", "bestellen"
     ]
     q = query.lower()
     return any(k in q for k in product_keywords)
@@ -216,26 +274,35 @@ def dispatcher(query: str, user_id: str):
                 apify_cost_eur = round(apify_cost_usd, 4)
                 final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
 
-                items = apify_data.get("items", apify_data)
-                return {
-                    "status": "success",
-                    "layer": "paid",
-                    "source": src,
-                    "cost_admin": apify_cost_eur,
-                    "cost_user": final_price_for_user,
-                    "results": items,
-                    "message": (
-                        f"🚀 **Marktplatz-Daten via {src}**\n\n"
-                        f"Admin-Kosten: {apify_cost_eur} $\n"
-                        f"Dein Preis: {final_price_for_user} $\n"
-                        f"Treffer gefunden: {len(items) if isinstance(items, list) else 'Verfügbar'}."
-                    ),
-                }
+                items = (
+                    apify_data.get("items")
+                    or apify_data.get("results")
+                    or apify_data.get("data")
+                    or apify_data.get("products")
+                    or (apify_data if isinstance(apify_data, list) else None)
+                )
+
+                if apify_data is not None:
+                    item_count = len(items) if isinstance(items, list) else "Verfügbar"
+                    return {
+                        "status": "success",
+                        "layer": "paid",
+                        "source": src,
+                        "cost_admin": apify_cost_eur,
+                        "cost_user": final_price_for_user,
+                        "results": items if items else apify_data,
+                        "message": (
+                            f"🚀 **Marktplatz-Daten via {src}**\n\n"
+                            f"Admin-Kosten: {apify_cost_eur} $\n"
+                            f"Dein Preis: {final_price_for_user} $\n"
+                            f"Treffer gefunden: {item_count}."
+                        ),
+                    }
             except Exception as e:
                 print(f"CRITICAL APIFY ERROR ({src}): {str(e)}")
                 continue
 
-    # Fallback
+    # Fallback-Quellen, falls Apify nicht greift
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
 
@@ -257,26 +324,36 @@ def dispatcher(query: str, user_id: str):
 
 
 # --- ASYNC MESSAGE PROCESSOR ---
-def process_message_async(chat_id, user_text, loading_msg_id):
+def process_message_async(chat_id: str, user_text: str, loading_msg_id: int):
     try:
         u_low = user_text.lower()
         url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
         save_message(chat_id, "user", user_text)
 
-        if chat_id in pending_code_updates:
+        # Überprüfung auf ausstehende Code-Updates via GitHub-Security
+        if str(chat_id) in pending_code_updates:
             if has_required_prefix(user_text) and any(k in u_low for k in ["ja", "ok", "bestätig", "hochladen"]):
                 requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "⚙️ Lade Code auf GitHub hoch..."})
                 result_msg = execute_final_github_update(chat_id)
                 requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": result_msg})
                 return
             else:
-                del pending_code_updates[chat_id]
+                del pending_code_updates[str(chat_id)]
 
+        # Einfache Begrüßung abfangen
         greetings = ["hallo", "hi", "guten morgen", "guten tag", "moin", "servus", "hey"]
         if any(g in u_low for g in greetings):
-            requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."})
+            requests.post(
+                url_edit,
+                json={
+                    "chat_id": chat_id,
+                    "message_id": loading_msg_id,
+                    "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."
+                }
+            )
             return
 
+        # Reguläre Anfrage verarbeiten
         dispatch_res = dispatcher(user_text, chat_id)
         bot_reply = dispatch_res.get("message", "Keine Daten gefunden.")
 
@@ -291,16 +368,17 @@ def process_message_async(chat_id, user_text, loading_msg_id):
             }
         )
     except Exception as e:
+        print(f"Error in process_message_async: {e}")
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
-                json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Fehler aufgetreten: {str(e)}"}
+                json={"chat_id": chat_id, "message_id": loading_msg_id, "text": f"Ein Fehler ist aufgetreten: {str(e)}"}
             )
-        except:
+        except Exception:
             pass
 
 
-# --- FLASK WEBHOOK ---
+# --- FLASK WEBHOOK & SERVER ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 @app.route("/webhook", methods=["POST"])
@@ -315,15 +393,17 @@ def webhook():
             chat_id = str(msg["chat"]["id"])
             text = msg.get("text", msg.get("caption", ""))
             if text:
+                # Sofort eine Lade-Nachricht an den Nutzer senden
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage..."}
                 ).json()
+                
                 lid = res.get("result", {}).get("message_id")
                 if lid:
                     executor.submit(process_message_async, chat_id, text, lid)
-    except:
-        pass
+    except Exception as e:
+        print(f"Webhook error: {e}")
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
@@ -331,4 +411,5 @@ def ping():
     return "Bot is alive!", 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port_val = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port_val)
