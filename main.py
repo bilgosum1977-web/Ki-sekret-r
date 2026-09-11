@@ -170,7 +170,7 @@ def execute_final_github_update(chat_id: str) -> str:
 # =====================================================================
 # APIFY ACTOR STARTEN & POLLING (SHOPPING-MODUS)
 # =====================================================================
-def run_apify_actor(query: str, actor_id: str = "junglee/Amazon-crawler"):
+def run_apify_actor(query: str, actor_id: str = "junglee/amazon-crawler"):
     if not APIFY_TOKEN:
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
@@ -347,7 +347,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
             if "ebay" in query.lower():
                 rohdaten = run_apify_actor(query, "automation-lab/ebay-scraper")
             else:
-                rohdaten = run_apify_actor(query, "junglee/Amazon-crawler")
+                rohdaten = run_apify_actor(query, "junglee/amazon-crawler")
             nachricht = process_amazon_results(rohdaten)
         else:
             send_telegram_message(chat_id, f"🧠 Denk nach...", message_id=message_id)
