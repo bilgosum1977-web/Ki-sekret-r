@@ -168,7 +168,7 @@ def execute_final_github_update(chat_id: str) -> str:
 
 
 # =====================================================================
-# 1. APIFY ACTOR STARTEN & POLLING (KORREKTE API-URLS)
+# 1. APIFY ACTOR STARTEN & POLLING (KORREKTE API-URLS & 120s TIMEOUT)
 # =====================================================================
 def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
     apify_token = os.getenv("APIFY_TOKEN")
@@ -218,13 +218,13 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
         
         print(f"🚀 Scraper {actor_id} erfolgreich gestartet. Starte Polling...", flush=True)
 
-        for attempt in range(18):
+        for attempt in range(24):
             time.sleep(5)
             status_response = requests.get(status_url, headers=headers, timeout=10)
             status_response.raise_for_status()
             
             run_status = status_response.json().get("data", {}).get("status")
-            print(f"🤖 [{attempt+1}/18] Actor {actor_id} Status: {run_status}", flush=True)
+            print(f"🤖 [{attempt+1}/24] Actor {actor_id} Status: {run_status}", flush=True)
             
             if run_status == "SUCCEEDED":
                 print(f"✅ {actor_id} fertig! Hole Dataset-Items...", flush=True)
@@ -236,7 +236,7 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
                 print(f"⚠️ Apify Actor {actor_id} abgebrochen mit Status: {run_status}.", flush=True)
                 return None
                 
-        print(f"⏱️ Apify Timeout für {actor_id}.", flush=True)
+        print(f"⏱️ Apify Timeout: {actor_id} brauchte länger als 120 Sekunden.", flush=True)
         return None
 
     except Exception as e:
@@ -245,32 +245,41 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
 
 
 # =====================================================================
-# 2. DATASET VERARBEITEN & FORMATIEREN (INKL. priceString)
+# 2. DATASET VERARBEITEN & FORMATIEREN (INTELLIGENTER PARSER)
 # =====================================================================
 def process_amazon_results(data_1):
     apify_lines = []
     found_any_apify = False
 
     if data_1 and isinstance(data_1, list):
-        found_any_apify = True
-        apify_lines.append("📦 **Amazon Angebote:**")
+        # Wir filtern leere Zeilen oder System-Einträge von Apify heraus
+        clean_items = [i for i in data_1 if i.get("title") or i.get("name")]
         
-        for item in data_1[:3]:
-            title = item.get("title") or item.get("title 100%") or item.get("name") or "Produkt ohne Titel"
-            title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
+        if clean_items:
+            found_any_apify = True
+            apify_lines.append("📦 **Gefundene Angebote:**")
             
-            price = item.get("priceString") or item.get("priceString 100%") or item.get("price") or "Preis auf Anfrage"
-            if isinstance(price, dict):
-                price = price.get("display") or price.get("value") or price.get("raw") or "Preis auf Anfrage"
-            else:
-                price = str(price)
+            for item in clean_items[:3]:
+                # 1. Titel auslesen
+                title = item.get("title") or item.get("name") or "Produkt ohne Titel"
+                title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "") # Schutz vor Markdown-Fehlern
+                
+                # 2. Preis auslesen
+                price = item.get("priceString") or item.get("price") or "Preis auf Anfrage"
+                if isinstance(price, dict):
+                    price = price.get("display") or price.get("value") or price.get("raw") or "Preis auf Anfrage"
+                else:
+                    price = str(price)
 
-            link = item.get("url") or item.get("link") or item.get("href") or "#"
-            if link != "#" and link.startswith("/"):
-                link = f"https://amazon.de{link}"
-            
-            apify_lines.append(f"• {title[:50]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
-        apify_lines.append("")
+                # 3. Link verarbeiten
+                link = item.get("url") or item.get("link") or item.get("href") or "#"
+                
+                # Absolute URL-Korrektur: Verhindert, dass relative Amazon-Pfade fehlschlagen
+                if link != "#" and link.startswith("/"):
+                    link = f"https://amazon.de{link}"
+                
+                apify_lines.append(f"• {title[:50]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
+            apify_lines.append("")
         
     return "\n".join(apify_lines) if found_any_apify else "⚠️ Produktdaten von Amazon/eBay sind gerade nicht verfügbar."
 
@@ -303,7 +312,7 @@ def send_telegram_message(chat_id, text, message_id=None):
         response = requests.post(url, json=payload, timeout=10)
         
         if response.status_code == 400 and "can't parse entities" in response.text:
-            print("⚠️ Markdown-Fehler erkannt. Sende als Klartext-Fallback...", flush=True)
+            print("⚠️ Telegram Parser-Fehler. Sende Text unformatiert als Fallback...", flush=True)
             clean_text = text.replace("**", "").replace("*", "").replace("[", "").replace("]", "")
             payload["text"] = clean_text
             payload.pop("parse_mode", None)
@@ -312,7 +321,7 @@ def send_telegram_message(chat_id, text, message_id=None):
         response.raise_for_status()
         return True
     except Exception as e:
-        print(f"❌ Telegram-Sende-Fehler: {e}", flush=True)
+        print(f"❌ Telegram-Sende-Fehler im Webhook: {e}", flush=True)
         return False
 
 
