@@ -192,9 +192,14 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE"
     elif "amazon" in actor_id_lower:
-        # EXAKTER KEY FÜR junglee/amazon-crawler: Er verlangt das Feld "search"
-        payload["search"] = query
-        payload["locationCode"] = "de"
+        # EXAKTE STRUKTUR FÜR JUNGLEE: Erzeugt eine codierte Such-URL als Objekt im Array
+        encoded_query = requests.utils.quote(query)
+        amazon_url = f"https://amazon.de{encoded_query}"
+        
+        payload["categoryOrProductUrls"] = [{"url": amazon_url}]
+        payload["maxItemsPerStartUrl"] = 3
+        payload["proxyCountry"] = "DE"
+        payload["language"] = "de"
     else:
         payload["search"] = query
 
