@@ -82,7 +82,7 @@ init_db()
 
 
 # =====================================================================
-# PRODUKTE DATENBANK (NEU)
+# PRODUKTE DATENBANK
 # =====================================================================
 
 def init_produkte_db():
@@ -153,22 +153,25 @@ def speichere_produkte(kategorie, data, shop):
         if data and isinstance(data, list):
             for item in data[:5]:
                 name = item.get("title") or item.get("name") or "Produkt"
-                preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
-                if isinstance(preis, dict):
-                    preis = preis.get("display") or preis.get("value") or "Auf Anfrage"
+                
+                raw_preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
+                if isinstance(raw_preis, dict):
+                    preis = raw_preis.get("display") or raw_preis.get("value") or "Auf Anfrage"
+                else:
+                    preis = str(raw_preis)
+                    
                 url = item.get("url") or item.get("link") or "#"
                 cursor.execute('''
                     INSERT INTO produkte
                     (kategorie, name, preis, url, shop)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (kategorie, name, str(preis), url, shop))
+                ''', (kategorie, name, preis, url, shop))
         conn.commit()
         conn.close()
         print(f"✅ Produkte gespeichert!")
     except Exception as e:
-        print(f"❌ Fehler: {e}", flush=True)
+        print(f"❌ Fehler beim Speichern: {e}", flush=True)
 
-# Tabelle direkt beim Start initialisieren
 init_produkte_db()
 
 
@@ -347,11 +350,11 @@ def process_platform_results(data, platform_name):
                 title = item.get("title") or item.get("name") or "Produkt"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
                 
-                price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
-                if isinstance(price, dict):
-                    price = price.get("display") or price.get("value") or price.get("raw") or "Auf Anfrage"
+                raw_price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
+                if isinstance(raw_price, dict):
+                    price = raw_price.get("display") or raw_price.get("value") or raw_price.get("raw") or "Auf Anfrage"
                 else:
-                    price = str(price)
+                    price = str(raw_price)
 
                 if price != "Auf Anfrage" and "EUR" not in price and "€" not in price:
                     price = f"EUR {price}"
@@ -434,7 +437,6 @@ def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
         if is_shopping:
-            # 1. ZUERST IN DER DATENBANK PRÜFEN
             if in_db_vorhanden(query):
                 send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** für: *{query}*", message_id=message_id)
                 db_produkte = hole_aus_db(query)
@@ -447,7 +449,6 @@ def process_message_async(chat_id, query, message_id, is_shopping):
                 nachricht = "\n".join(final_lines)
             
             else:
-                # 2. WENN NICHT DA: LIVE SCRAPEN & SPEICHERN
                 send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
@@ -457,7 +458,6 @@ def process_message_async(chat_id, query, message_id, is_shopping):
                     amazon_data = future_amazon.result()
                     ebay_data = future_ebay.result()
 
-                # In DB speichern
                 if amazon_data:
                     speichere_produkte(query, amazon_data, "Amazon")
                 if ebay_data:
