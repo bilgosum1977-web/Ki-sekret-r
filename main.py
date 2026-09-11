@@ -159,7 +159,6 @@ def execute_final_github_update(chat_id: str) -> str:
             payload["sha"] = sha
             
         put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
-        # KORRIGIERT: Liste der Statuscodes hinzugefügt
         if put_res.status_code in [200, 201]:
             return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde auf GitHub aktualisiert."
         else:
@@ -171,13 +170,13 @@ def execute_final_github_update(chat_id: str) -> str:
 # =====================================================================
 # APIFY ACTOR STARTEN & POLLING (SHOPPING-MODUS)
 # =====================================================================
-def run_apify_actor(query: str, actor_id: str = "junglee/amazon-crawler"):
+def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
     if not APIFY_TOKEN:
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
 
-    clean_actor_id = actor_id.replace("~", "/")
-    url = f"https://api.apify.com/v2/acts/{clean_actor_id}/runs?waitForFinish=0"
+    # Tilde (~) bleibt im String erhalten, kein Ersetzen durch Slash!
+    url = f"https://api.apify.com/v2/acts/{actor_id}/runs?waitForFinish=0"
 
     headers = {
         "Authorization": f"Bearer {APIFY_TOKEN}",
@@ -344,7 +343,6 @@ def process_message_async(chat_id, query, message_id, is_shopping):
         if is_shopping:
             send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
             
-            # KORRIGIERT: junglee~amazon-crawler komplett in Kleinbuchstaben!
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
                 future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
                 future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
