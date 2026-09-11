@@ -3,7 +3,8 @@ groq
 requests
 Pillow
 onnxruntime
-duckduckgo_search
+ddgs
 geopy
+
 
 
