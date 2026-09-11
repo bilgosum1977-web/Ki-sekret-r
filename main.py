@@ -152,25 +152,60 @@ def speichere_produkte(kategorie, data, shop):
         cursor = conn.cursor()
         if data and isinstance(data, list):
             for item in data[:5]:
-                name = item.get("title") or item.get("name") or "Produkt"
+                name = (
+                    item.get("title") or 
+                    item.get("name") or 
+                    "Produkt"
+                )
                 
-                raw_preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
-                if isinstance(raw_preis, dict):
-                    preis = raw_preis.get("display") or raw_preis.get("value") or "Auf Anfrage"
-                else:
-                    preis = str(raw_preis)
-                    
-                url = item.get("url") or item.get("link") or "#"
+                # FIX: Preis immer to Text machen
+                preis = (
+                    item.get("priceString") or
+                    item.get("price") or
+                    item.get("priceText") or
+                    "Auf Anfrage"
+                )
+                
+                # FIX: Egal ob Zahl oder Dict
+                if isinstance(preis, dict):
+                    preis = (
+                        preis.get("display") or
+                        preis.get("value") or
+                        "Auf Anfrage"
+                    )
+                
+                # FIX: Zahl zu Text umwandeln
+                preis = str(preis)
+                
+                # EUR hinzufügen wenn nötig
+                if (preis != "Auf Anfrage" and 
+                    "€" not in preis and 
+                    "EUR" not in preis):
+                    preis = f"EUR {preis}"
+                
+                url = (
+                    item.get("url") or
+                    item.get("link") or
+                    "#"
+                )
+                
                 cursor.execute('''
                     INSERT INTO produkte
-                    (kategorie, name, preis, url, shop)
+                    (kategorie, name, 
+                     preis, url, shop)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (kategorie, name, preis, url, shop))
+                ''', (
+                    kategorie, 
+                    name, 
+                    preis,  # Jetzt immer Text ✅
+                    url, 
+                    shop
+                ))
         conn.commit()
         conn.close()
         print(f"✅ Produkte gespeichert!")
     except Exception as e:
-        print(f"❌ Fehler beim Speichern: {e}", flush=True)
+        print(f"❌ Fehler: {e}", flush=True)
 
 init_produkte_db()
 
