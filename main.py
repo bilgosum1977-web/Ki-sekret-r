@@ -81,6 +81,97 @@ def save_message(user_id, role, content):
 init_db()
 
 
+# =====================================================================
+# PRODUKTE DATENBANK (NEU)
+# =====================================================================
+
+def init_produkte_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS produkte (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kategorie TEXT,
+                name TEXT,
+                preis TEXT,
+                url TEXT,
+                shop TEXT,
+                datum DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print("✅ Produkte-Tabelle bereit!", flush=True)
+    except Exception as e:
+        print(f"❌ Fehler: {e}", flush=True)
+
+def in_db_vorhanden(kategorie):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM produkte
+            WHERE LOWER(kategorie) = LOWER(?)
+            AND datum > datetime('now', '-24 hours')
+        ''', (kategorie,))
+        anzahl = cursor.fetchone()[0]
+        conn.close()
+        if anzahl >= 3:
+            print(f"✅ '{kategorie}' in DB gefunden!")
+            return True
+        print(f"❌ '{kategorie}' nicht in DB!")
+        return False
+    except Exception as e:
+        print(f"❌ Fehler: {e}", flush=True)
+        return False
+
+def hole_aus_db(kategorie):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT name, preis, url, shop
+            FROM produkte
+            WHERE LOWER(kategorie) = LOWER(?)
+            AND datum > datetime('now', '-24 hours')
+            ORDER BY datum DESC
+            LIMIT 6
+        ''', (kategorie,))
+        produkte = cursor.fetchall()
+        conn.close()
+        print(f"⚡ {len(produkte)} aus DB geholt!")
+        return produkte
+    except Exception as e:
+        print(f"❌ Fehler: {e}", flush=True)
+        return []
+
+def speichere_produkte(kategorie, data, shop):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        if data and isinstance(data, list):
+            for item in data[:5]:
+                name = item.get("title") or item.get("name") or "Produkt"
+                preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
+                if isinstance(preis, dict):
+                    preis = preis.get("display") or preis.get("value") or "Auf Anfrage"
+                url = item.get("url") or item.get("link") or "#"
+                cursor.execute('''
+                    INSERT INTO produkte
+                    (kategorie, name, preis, url, shop)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (kategorie, name, str(preis), url, shop))
+        conn.commit()
+        conn.close()
+        print(f"✅ Produkte gespeichert!")
+    except Exception as e:
+        print(f"❌ Fehler: {e}", flush=True)
+
+# Tabelle direkt beim Start initialisieren
+init_produkte_db()
+
+
 # --- CODE INTEGRITY & GITHUB UPDATES ---
 def has_required_prefix(message: str) -> bool:
     if not message:
@@ -192,15 +283,10 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE"
     elif "amazon" in actor_id_lower:
-        # EXAKTE URL-AUFBAU: Fügt das zwingend von Apify geforderte /s?k= hinzu!
         encoded_query = requests.utils.quote(query)
         amazon_url = f"https://amazon.de/s?k={encoded_query}"
-        
-        # Übergabe als gefordertes Objekt-Array
         payload["categoryOrProductUrls"] = [{"url": amazon_url}]
         payload["maxItemsPerStartUrl"] = 3
-        
-        # Wir entfernen alte Stör-Keys, um den Request schlank zu halten
         payload.pop("proxyCountry", None)
         payload.pop("language", None)
     else:
@@ -248,7 +334,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
 
 
 # =====================================================================
-# INTELLIGENTER PLATFORM-PARSER (Maximale Preiskompatibilität)
+# INTELLIGENTER PLATFORM-PARSER
 # =====================================================================
 def process_platform_results(data, platform_name):
     lines = []
@@ -261,14 +347,12 @@ def process_platform_results(data, platform_name):
                 title = item.get("title") or item.get("name") or "Produkt"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
                 
-                # Maximale Keys abdecken: priceString, price, raw, value, display
                 price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
                 if isinstance(price, dict):
                     price = price.get("display") or price.get("value") or price.get("raw") or "Auf Anfrage"
                 else:
                     price = str(price)
 
-                # Falls der Scraper nur eine reine Zahl liefert (z.B. 81.9), hängen wir das EUR-Zeichen an
                 if price != "Auf Anfrage" and "EUR" not in price and "€" not in price:
                     price = f"EUR {price}"
 
@@ -279,11 +363,6 @@ def process_platform_results(data, platform_name):
                 lines.append(f"• {title[:45]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
             lines.append("")
     return lines
-
-
-def process_amazon_results(data_1):
-    res = process_platform_results(data_1, "Amazon")
-    return "\n".join(res) if res else "⚠️ Produktdaten von Amazon/eBay sind gerade nicht verfügbar."
 
 
 # =====================================================================
@@ -308,7 +387,7 @@ def ask_groq(query: str) -> str:
 
 
 # =====================================================================
-# TELEGRAM SENDEN (MIT EDIT-UNTERSTÜTZUNG & REIN-TEXT FALLBACK)
+# TELEGRAM SENDEN
 # =====================================================================
 def send_telegram_message(chat_id, text, message_id=None):
     if not TELEGRAM_BOT_TOKEN:
@@ -350,32 +429,51 @@ def send_telegram_message(chat_id, text, message_id=None):
         return False
 
 
-# --- ASYNCHRONER PROZESSOR (KORRIGIERT AUF REINE KLEINSCHREIBUNG) ---
+# --- ASYNCHRONER PROZESSOR MIT DATENBANK-CHECK ---
 def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
         if is_shopping:
-            send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
-                future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
-                future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
+            # 1. ZUERST IN DER DATENBANK PRÜFEN
+            if in_db_vorhanden(query):
+                send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** für: *{query}*", message_id=message_id)
+                db_produkte = hole_aus_db(query)
                 
-                amazon_data = future_amazon.result()
-                ebay_data = future_ebay.result()
-
-            final_lines = ["🛍️ **Dein Produkt-Vergleich:**\n"]
-            
-            amazon_lines = process_platform_results(amazon_data, "Amazon")
-            ebay_lines = process_platform_results(ebay_data, "eBay")
-            
-            final_lines.extend(amazon_lines)
-            final_lines.extend(ebay_lines)
-            
-            if len(final_lines) <= 1:
-                nachricht = "⚠️ Aktuell konnten weder auf Amazon noch auf eBay Angebote gefunden werden."
-            else:
+                final_lines = ["🛍️ **Dein Produkt-Vergleich (aus Cache):**\n"]
+                for p in db_produkte:
+                    name, preis, url, shop = p
+                    final_lines.append(f"• [{shop}] {name[:45]}...\n  💰 *{preis}* | 🔗 [Zum Shop]({url})")
+                
                 nachricht = "\n".join(final_lines)
+            
+            else:
+                # 2. WENN NICHT DA: LIVE SCRAPEN & SPEICHERN
+                send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
+                    future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
+                    future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
+                    
+                    amazon_data = future_amazon.result()
+                    ebay_data = future_ebay.result()
+
+                # In DB speichern
+                if amazon_data:
+                    speichere_produkte(query, amazon_data, "Amazon")
+                if ebay_data:
+                    speichere_produkte(query, ebay_data, "eBay")
+
+                final_lines = ["🛍️ **Dein Produkt-Vergleich:**\n"]
+                amazon_lines = process_platform_results(amazon_data, "Amazon")
+                ebay_lines = process_platform_results(ebay_data, "eBay")
+                
+                final_lines.extend(amazon_lines)
+                final_lines.extend(ebay_lines)
+                
+                if len(final_lines) <= 1:
+                    nachricht = "⚠️ Aktuell konnten weder auf Amazon noch auf eBay Angebote gefunden werden."
+                else:
+                    nachricht = "\n".join(final_lines)
         else:
             send_telegram_message(chat_id, f"🧠 Denk nach...", message_id=message_id)
             if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
@@ -410,7 +508,6 @@ def webhook():
         if raw_text:
             clean_query = raw_text.strip()
             
-            # Überprüfung auf GitHub-Update-Befehle vom Admin
             if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
                 command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                 if command_part == "ja":
@@ -426,7 +523,6 @@ def webhook():
                     is_shopping = True
                     break
 
-            # Sofortige "In Bearbeitung"-Nachricht senden
             if TELEGRAM_BOT_TOKEN:
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
