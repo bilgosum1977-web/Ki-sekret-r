@@ -192,14 +192,17 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE"
     elif "amazon" in actor_id_lower:
-        # EXAKTE STRUKTUR FÜR JUNGLEE: Erzeugt eine codierte Such-URL als Objekt im Array
+        # EXAKTE URL-AUFBAU: Fügt das zwingend von Apify geforderte /s?k= hinzu!
         encoded_query = requests.utils.quote(query)
-        amazon_url = f"https://amazon.de{encoded_query}"
+        amazon_url = f"https://amazon.de/s?k={encoded_query}"
         
+        # Übergabe als gefordertes Objekt-Array
         payload["categoryOrProductUrls"] = [{"url": amazon_url}]
         payload["maxItemsPerStartUrl"] = 3
-        payload["proxyCountry"] = "DE"
-        payload["language"] = "de"
+        
+        # Wir entfernen alte Stör-Keys, um den Request schlank zu halten
+        payload.pop("proxyCountry", None)
+        payload.pop("language", None)
     else:
         payload["search"] = query
 
