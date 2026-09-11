@@ -175,7 +175,6 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
 
-    # Tilde (~) bleibt im String erhalten, kein Ersetzen durch Slash!
     url = f"https://api.apify.com/v2/acts/{actor_id}/runs?waitForFinish=0"
 
     headers = {
@@ -191,10 +190,10 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
     actor_id_lower = actor_id.lower()
     if "ebay" in actor_id_lower:
         payload["searchQueries"] = [query]
-        payload["marketplace"] = "DE" 
+        payload["marketplace"] = "DE"
     elif "amazon" in actor_id_lower:
-        payload["searchKeywords"] = query
-        payload["locationCode"] = "de"
+        # KORREKTUR FÜR JUNGLEE: Er erwartet "queries" als Liste oder String statt searchKeywords
+        payload["queries"] = [query] if not isinstance(query, list) else query
     else:
         payload["search"] = query
 
