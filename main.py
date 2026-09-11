@@ -416,7 +416,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
 # --- FLASK WEBHOOK MIT INTENT-ERKENNUNG ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST"], strict_slashes=False)
 def webhook():
     try:
         data = request.get_json()
