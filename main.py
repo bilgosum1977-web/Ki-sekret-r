@@ -167,7 +167,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- ABSOLUT STABILES APIFY POLLING MIT ERHÖHTEM TIMEOUT & AUTH-HEADERN ---
+# --- APIFY POLLING MIT KORRIGIERTER PAYLOAD & AUTH-HEADERN ---
 def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scraper"):
     if not APIFY_TOKEN:
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
@@ -180,11 +180,11 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
         "Content-Type": "application/json"
     }
 
+    # Payload-Konfiguration (Kompakt und fehlerfrei ohne ungültige Proxy-Gruppen)
     payload = {
         "maxItems": 5,
         "proxyConfiguration": {
-            "useApifyProxy": True,
-            "apifyProxyGroups": ["RESIDENTIAL"]
+            "useApifyProxy": True
         }
     }
     
@@ -261,7 +261,7 @@ def search_ddgs(query: str):
         return None
 
 
-# --- SMART DISPATCHER MIT OPTIMIERTEM APIFY-PARSING & KOSTENSTEUERUNG ---
+# --- SMART DISPATCHER ---
 def dispatcher(query: str, user_id: str, is_shopping: bool = False):
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         future_searxng = executor.submit(search_searxng, query)
@@ -308,7 +308,7 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
             data_1 = future_apify_1.result()
             data_2 = future_apify_2.result()
 
-        # === OPTIMIERTE AUSWERTUNG AMAZON ===
+        # === AMAZON AUSWERTUNG ===
         if data_1 and isinstance(data_1, list):
             found_any_apify = True
             apify_lines.append("📦 **Amazon Angebote:**")
@@ -334,7 +334,7 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
                 apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
             apify_lines.append("")
 
-        # === OPTIMIERTE AUSWERTUNG EBAY / ZWEITER ANBIETER ===
+        # === EBAY AUSWERTUNG ===
         if data_2 and isinstance(data_2, list):
             found_any_apify = True
             apify_lines.append("🛒 **Weitere Angebote:**")
@@ -367,7 +367,7 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
     return "❌ Keine Ergebnisse gefunden."
 
 
-# --- ERWEITERTER ASYNCHRONER PROZESSOR MIT SICHERHEITSNETZ ---
+# --- ASYNCHRONER PROZESSOR MIT SICHERHEITSNETZ ---
 def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
