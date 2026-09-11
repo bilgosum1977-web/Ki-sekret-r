@@ -167,7 +167,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- ASYNCHRONER APIFY ACTOR MIT POLLING (KORRIGIERTE ENDPUNKTE) ---
+# --- ASYNCHRONER APIFY ACTOR MIT POLLING ---
 def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scraper"):
     if not APIFY_TOKEN:
         return None
@@ -193,7 +193,6 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
         if not run_id or not dataset_id:
             return None
 
-        # Korrigierter Status-Polling Endpunkt
         status_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
         
         for _ in range(12):
@@ -204,7 +203,6 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
             run_status = status_response.json().get("data", {}).get("status")
             
             if run_status == "SUCCEEDED":
-                # Korrigierter Dataset Endpunkt
                 dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={APIFY_TOKEN}"
                 data_response = requests.get(dataset_url, timeout=15)
                 data_response.raise_for_status()
@@ -241,7 +239,7 @@ def search_ddgs(query: str):
         return None
 
 
-# --- SMART DISPATCHER MIT KOSTENSTEUERUNG ---
+# --- SMART DISPATCHER MIT OPTIMIERTEM APIFY-PARSING & KOSTENSTEUERUNG ---
 def dispatcher(query: str, user_id: str, is_shopping: bool = False):
     # 1. Kostenlose Web-Quellen parallel abfragen
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -290,28 +288,49 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
             data_1 = future_apify_1.result()
             data_2 = future_apify_2.result()
 
-        # Auswertung Amazon
+        # === OPTIMIERTE AUSWERTUNG AMAZON ===
         if data_1 and isinstance(data_1, list):
             found_any_apify = True
             apify_lines.append("📦 **Amazon Angebote:**")
+            
             for item in data_1[:3]:
-                title = item.get("title", "Produkt")
-                price_data = item.get("price")
-                price = price_data.get("display") if isinstance(price_data, dict) else price_data
-                if not price:
-                    price = "Preis auf Anfrage"
-                link = item.get("url", "#")
+                title = item.get("title") or item.get("name") or "Produkt ohne Titel"
+                
+                price_field = item.get("price")
+                price = "Preis auf Anfrage"
+                
+                if isinstance(price_field, dict):
+                    price = price_field.get("display") or price_field.get("value") or price_field.get("raw") or "Preis auf Anfrage"
+                elif isinstance(price_field, (str, int, float)):
+                    price = str(price_field)
+                
+                if isinstance(price_field, (int, float)) or (isinstance(price, str) and price.replace('.', '', 1).isdigit()):
+                    price = f"{price} €"
+
+                link = item.get("url") or item.get("link") or item.get("href") or "#"
+                if link != "#" and link.startswith("/"):
+                    link = f"https://amazon.de{link}"
+                
                 apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
             apify_lines.append("")
 
-        # Auswertung eBay
+        # === OPTIMIERTE AUSWERTUNG EBAY / ZWEITER ANBIETER ===
         if data_2 and isinstance(data_2, list):
             found_any_apify = True
-            apify_lines.append("🛒 **eBay Angebote:**")
+            apify_lines.append("🛒 **Weitere Angebote:**")
+            
             for item in data_2[:3]:
-                title = item.get("title", "Produkt")
-                price = item.get("price", "Preis auf Anfrage")
-                link = item.get("url", "#")
+                title = item.get("title") or item.get("name") or "Produkt"
+                
+                price_field = item.get("price")
+                price = "Preis auf Anfrage"
+                if isinstance(price_field, dict):
+                    price = price_field.get("display") or price_field.get("value") or "Preis auf Anfrage"
+                elif price_field:
+                    price = str(price_field)
+                    
+                link = item.get("url") or item.get("link") or item.get("href") or "#"
+                
                 apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
             apify_lines.append("")
     else:
@@ -334,7 +353,6 @@ def process_message_async(chat_id, query, message_id, is_shopping):
     try:
         result_text = dispatcher(query, chat_id, is_shopping)
         
-        # Korrigierte Telegram API URL mit /bot<TOKEN>/
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
             json={
@@ -368,12 +386,10 @@ def webhook():
                 clean_query = raw_text.strip()
                 is_shopping = False
                 
-                # Präfix "suche " prüfen und case-insensitive entfernen
                 if clean_query.lower().startswith("suche "):
                     clean_query = clean_query[6:].strip()
-                    is_shopping = True  # Shopping-Intent Flag aktivieren
+                    is_shopping = True  # Shopping-Intent aktivieren
 
-                # Korrigierte Telegram API URL mit /bot<TOKEN>/
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": f"⏳ Suche nach: *{clean_query}*...", "parse_mode": "Markdown"}
