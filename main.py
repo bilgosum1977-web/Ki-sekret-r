@@ -167,7 +167,9 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- ABSOLUT STABILES APIFY POLLING (REPARIERTE URL-SYNTAX) ---
+# =====================================================================
+# 1. APIFY ACTOR STARTEN & POLLING (KORREKTE API-URLS)
+# =====================================================================
 def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
     apify_token = os.getenv("APIFY_TOKEN")
     if not apify_token:
@@ -184,21 +186,16 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
 
     payload = {
         "maxItems": 5,
-        "proxyConfiguration": {
-            "useApifyProxy": True
-        }
+        "proxyConfiguration": {"useApifyProxy": True}
     }
     
     actor_id_lower = actor_id.lower()
-    
     if "ebay" in actor_id_lower:
         payload["searchQueries"] = [query]
         payload["marketplace"] = "DE" 
-        
     elif "amazon" in actor_id_lower:
         payload["searchKeywords"] = query
         payload["locationCode"] = "de"
-        
     elif "google" in actor_id_lower:
         payload["queries"] = query
     else:
@@ -219,11 +216,10 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
         status_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
         dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
         
-        print(f"🚀 Scraper {actor_id} erfolgreich gestartet (Run-ID: {run_id}). Starte Polling...", flush=True)
+        print(f"🚀 Scraper {actor_id} erfolgreich gestartet. Starte Polling...", flush=True)
 
         for attempt in range(18):
             time.sleep(5)
-            
             status_response = requests.get(status_url, headers=headers, timeout=10)
             status_response.raise_for_status()
             
@@ -240,12 +236,84 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
                 print(f"⚠️ Apify Actor {actor_id} abgebrochen mit Status: {run_status}.", flush=True)
                 return None
                 
-        print(f"⏱️ Apify Timeout: {actor_id} brauchte länger als 90 Sekunden.", flush=True)
+        print(f"⏱️ Apify Timeout für {actor_id}.", flush=True)
         return None
 
     except Exception as e:
         print(f"❌ Schwerer Fehler beim Apify-Abruf ({actor_id}): {e}", flush=True)
         return None
+
+
+# =====================================================================
+# 2. DATASET VERARBEITEN & FORMATIEREN (INKL. priceString)
+# =====================================================================
+def process_amazon_results(data_1):
+    apify_lines = []
+    found_any_apify = False
+
+    if data_1 and isinstance(data_1, list):
+        found_any_apify = True
+        apify_lines.append("📦 **Amazon Angebote:**")
+        
+        for item in data_1[:3]:
+            title = item.get("title") or item.get("title 100%") or item.get("name") or "Produkt ohne Titel"
+            title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
+            
+            price = item.get("priceString") or item.get("priceString 100%") or item.get("price") or "Preis auf Anfrage"
+            if isinstance(price, dict):
+                price = price.get("display") or price.get("value") or price.get("raw") or "Preis auf Anfrage"
+            else:
+                price = str(price)
+
+            link = item.get("url") or item.get("link") or item.get("href") or "#"
+            if link != "#" and link.startswith("/"):
+                link = f"https://amazon.de{link}"
+            
+            apify_lines.append(f"• {title[:50]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
+        apify_lines.append("")
+        
+    return "\n".join(apify_lines) if found_any_apify else "⚠️ Produktdaten von Amazon/eBay sind gerade nicht verfügbar."
+
+
+# =====================================================================
+# 3. TELEGRAM SENDEN (KORREKTE API-URL & FALLBACK)
+# =====================================================================
+def send_telegram_message(chat_id, text, message_id=None):
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    
+    if message_id:
+        url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+    else:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 400 and "can't parse entities" in response.text:
+            print("⚠️ Markdown-Fehler erkannt. Sende als Klartext-Fallback...", flush=True)
+            clean_text = text.replace("**", "").replace("*", "").replace("[", "").replace("]", "")
+            payload["text"] = clean_text
+            payload.pop("parse_mode", None)
+            response = requests.post(url, json=payload, timeout=10)
+            
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ Telegram-Sende-Fehler: {e}", flush=True)
+        return False
 
 
 # --- KOSTENLOSE SUCHMASCHINEN (SearXNG & DuckDuckGo) ---
@@ -268,147 +336,42 @@ def search_ddgs(query: str):
         return None
 
 
-# --- SMART DISPATCHER ---
-def dispatcher(query: str, user_id: str, is_shopping: bool = False):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        future_searxng = executor.submit(search_searxng, query)
-        future_ddgs = executor.submit(search_ddgs, query)
-        
-        searxng_res = future_searxng.result()
-        ddgs_res = future_ddgs.result()
-
-    response_lines = [f"🔍 **Suchergebnisse für:** *{query}*\n"]
-    has_web_results = False
-
-    if searxng_res:
-        has_web_results = True
-        response_lines.append("🌐 **SearXNG Treffer (Kostenlos):**")
-        for item in searxng_res[:3]:
-            title = item.get("title", "Kein Titel")
-            link = item.get("url", "#")
-            response_lines.append(f"• [{title}]({link})")
-        response_lines.append("")
-
-    if ddgs_res:
-        has_web_results = True
-        response_lines.append("🦆 **DuckDuckGo Treffer (Kostenlos):**")
-        for item in ddgs_res[:3]:
-            title = item.get("title", "Kein Titel")
-            body = item.get("body", "")
-            link = item.get("href", "#")
-            response_lines.append(f"• [{title}]({link})\n  _{body[:80]}..._")
-        response_lines.append("")
-
-    apify_lines = []
-    found_any_apify = False
-
-    if is_shopping:
-        actor_id_1 = "apify~amazon-crawler"
-        actor_id_2 = "automation-lab~ebay-scraper"
-
-        print(f"🛒 Shopping-Intent erkannt. Starte Apify-Actors für: {query}")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as apify_executor:
-            future_apify_1 = apify_executor.submit(run_apify_actor, query, actor_id_1)
-            future_apify_2 = apify_executor.submit(run_apify_actor, query, actor_id_2)
-            
-            data_1 = future_apify_1.result()
-            data_2 = future_apify_2.result()
-
-        # === AMAZON AUSWERTUNG ===
-        if data_1 and isinstance(data_1, list):
-            found_any_apify = True
-            apify_lines.append("📦 **Amazon Angebote:**")
-            
-            for item in data_1[:3]:
-                title = item.get("title") or item.get("name") or "Produkt ohne Titel"
-                
-                price_field = item.get("price")
-                price = "Preis auf Anfrage"
-                
-                if isinstance(price_field, dict):
-                    price = price_field.get("display") or price_field.get("value") or price_field.get("raw") or "Preis auf Anfrage"
-                elif isinstance(price_field, (str, int, float)):
-                    price = str(price_field)
-                
-                if isinstance(price_field, (int, float)) or (isinstance(price, str) and price.replace('.', '', 1).isdigit()):
-                    price = f"{price} €"
-
-                link = item.get("url") or item.get("link") or item.get("href") or "#"
-                if link != "#" and link.startswith("/"):
-                    link = f"https://amazon.de{link}"
-                
-                apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
-            apify_lines.append("")
-
-        # === EBAY AUSWERTUNG ===
-        if data_2 and isinstance(data_2, list):
-            found_any_apify = True
-            apify_lines.append("🛒 **Weitere Angebote:**")
-            
-            for item in data_2[:3]:
-                title = item.get("title") or item.get("name") or "Produkt"
-                
-                price_field = item.get("price")
-                price = "Preis auf Anfrage"
-                if isinstance(price_field, dict):
-                    price = price_field.get("display") or price_field.get("value") or "Preis auf Anfrage"
-                elif price_field:
-                    price = str(price_field)
-                    
-                link = item.get("url") or item.get("link") or item.get("href") or "#"
-                
-                apify_lines.append(f"• {title[:60]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
-            apify_lines.append("")
-    else:
-        print(f"🍃 Normaler Info-Request für '{query}'. Apify übersprungen.")
-
-    if found_any_apify:
-        response_lines.extend(apify_lines)
-        return "\n".join(response_lines)
-    elif has_web_results:
-        if is_shopping:
-            response_lines.append("⚠️ _Produktdaten von Amazon/eBay sind gerade nicht verfügbar._")
-        return "\n".join(response_lines)
-
-    return "❌ Keine Ergebnisse gefunden."
-
-
-# --- ASYNCHRONER PROZESSOR MIT SICHERHEITSNETZ ---
+# --- ASYNCHRONER PROZESSOR MIT 3-SCHRITTE-WORKFLOW ---
 def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
-        result_text = dispatcher(query, chat_id, is_shopping)
-        print(f"📋 Dispatcher-Ergebnis für '{query}': {result_text[:50]}...", flush=True)
-        
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-        payload = {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": result_text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
-        
-        response = requests.post(url, json=payload, timeout=15)
-        response.raise_for_status()
-        print(f"✅ Telegram-Nachricht {message_id} erfolgreich editiert.", flush=True)
+        if is_shopping:
+            # 1. Scraper ausführen (Rohdaten holen)
+            rohdaten = run_apify_actor(query, "apify~amazon-crawler")
+            
+            # 2. Text generieren (Ergebnisse formatieren)
+            nachricht = process_amazon_results(rohdaten)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f_searx = executor.submit(search_searxng, query)
+                f_ddgs = executor.submit(search_ddgs, query)
+                searx_res = f_searx.result()
+                ddgs_res = f_ddgs.result()
+
+            lines = [f"🔍 **Suchergebnisse für:** *{query}*\n"]
+            if searx_res:
+                lines.append("🌐 **SearXNG Treffer:**")
+                for item in searx_res[:3]:
+                    lines.append(f"• [{item.get('title')}]({item.get('url')})")
+                lines.append("")
+            if ddgs_res:
+                lines.append("🦆 **DuckDuckGo Treffer:**")
+                for item in ddgs_res[:3]:
+                    lines.append(f"• [{item.get('title')}]({item.get('href')})\n  _{item.get('body', '')[:80]}..._")
+                lines.append("")
+            nachricht = "\n".join(lines) if (searx_res or ddgs_res) else "❌ Keine Ergebnisse gefunden."
+
+        # 3. Nachricht absenden / editieren
+        send_telegram_message(chat_id, nachricht, message_id=message_id)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Hintergrund-Thread: {thread_error}", flush=True)
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
-                json={
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "text": f"❌ Interner Fehler bei der Verarbeitung: `{str(thread_error)}`",
-                    "parse_mode": "Markdown"
-                },
-                timeout=10
-            )
-        except Exception:
-            pass
+        send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
 
 
 # --- FLASK WEBHOOK MIT GET/POST TEST-MODUS & FUZZY MATCHING ---
@@ -416,11 +379,9 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 @app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
 def webhook():
-    # Wenn wir die Seite einfach im Browser aufrufen (GET)
     if request.method == "GET":
         return "Webhook-Route ist aktiv und bereit für Telegram! 🚀", 200
         
-    # Wenn Telegram Daten sendet (POST)
     try:
         data = request.get_json()
         if not data:
@@ -446,8 +407,9 @@ def webhook():
                         break
 
                 # Infotext an Telegram senden
+                bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
                 res = requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
                     json={"chat_id": chat_id, "text": f"⏳ Suche nach: *{clean_query}*...", "parse_mode": "Markdown"}
                 ).json()
                 
