@@ -167,23 +167,38 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- ASYNCHRONER APIFY ACTOR MIT POLLING ---
+# --- ABSOLUT STABILES APIFY POLLING MIT ERHÖHTEM TIMEOUT & AUTH-HEADERN ---
 def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scraper"):
     if not APIFY_TOKEN:
+        print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
 
-    url = f"https://api.apify.com/v2/acts/{actor_id}/runs?token={APIFY_TOKEN}&waitForFinish=0"
+    url = f"https://api.apify.com/v2/acts/{actor_id}/runs?waitForFinish=0"
 
-    payload = {"maxItems": 5}
+    headers = {
+        "Authorization": f"Bearer {APIFY_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "maxItems": 5,
+        "proxyConfiguration": {
+            "useApifyProxy": True,
+            "apifyProxyGroups": ["RESIDENTIAL"]
+        }
+    }
+    
     if "ebay" in actor_id.lower():
         payload["searchKeyword"] = query
     elif "google" in actor_id.lower():
         payload["queries"] = query
+    elif "amazon" in actor_id.lower():
+        payload["keyword"] = query
     else:
         payload["search"] = query
 
     try:
-        response = requests.post(url, json=payload, timeout=15)
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
         response.raise_for_status()
         
         run_data = response.json().get("data", {})
@@ -191,31 +206,38 @@ def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scr
         dataset_id = run_data.get("defaultDatasetId")
         
         if not run_id or not dataset_id:
+            print(f"❌ Fehler: Start-Daten unvollständig für {actor_id}", flush=True)
             return None
 
-        status_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
+        status_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
+        dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
         
-        for _ in range(12):
+        print(f"🚀 Scraper {actor_id} erfolgreich gestartet (Run-ID: {run_id}). Starte Polling...", flush=True)
+
+        for attempt in range(18):
             time.sleep(5)
-            status_response = requests.get(status_url, timeout=10)
+            
+            status_response = requests.get(status_url, headers=headers, timeout=10)
             status_response.raise_for_status()
             
             run_status = status_response.json().get("data", {}).get("status")
+            print(f"🤖 [{attempt+1}/18] Actor {actor_id} Status: {run_status}", flush=True)
             
             if run_status == "SUCCEEDED":
-                dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={APIFY_TOKEN}"
-                data_response = requests.get(dataset_url, timeout=15)
+                print(f"✅ {actor_id} fertig! Hole Dataset-Items...", flush=True)
+                data_response = requests.get(dataset_url, headers=headers, timeout=15)
                 data_response.raise_for_status()
                 return data_response.json()
                 
             elif run_status in ["FAILED", "ABORTED", "TIMED-OUT"]:
-                print(f"⚠️ Apify Actor {actor_id} abgebrochen. Status: {run_status}.")
+                print(f"⚠️ Apify Actor {actor_id} abgebrochen mit Status: {run_status}.", flush=True)
                 return None
                 
-        print(f"⏱️ Apify Timeout für Actor {actor_id}.")
+        print(f"⏱️ Apify Timeout: {actor_id} brauchte länger als 90 Sekunden.", flush=True)
         return None
+
     except Exception as e:
-        print(f"❌ Apify Polling Fehler: {e}")
+        print(f"❌ Schwerer Fehler beim Apify-Abruf ({actor_id}): {e}", flush=True)
         return None
 
 
@@ -241,7 +263,6 @@ def search_ddgs(query: str):
 
 # --- SMART DISPATCHER MIT OPTIMIERTEM APIFY-PARSING & KOSTENSTEUERUNG ---
 def dispatcher(query: str, user_id: str, is_shopping: bool = False):
-    # 1. Kostenlose Web-Quellen parallel abfragen
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         future_searxng = executor.submit(search_searxng, query)
         future_ddgs = executor.submit(search_ddgs, query)
@@ -271,7 +292,6 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
             response_lines.append(f"• [{title}]({link})\n  _{body[:80]}..._")
         response_lines.append("")
 
-    # 2. Apify-Shopping-Scraper NUR bei echtem Shopping-Intent starten
     apify_lines = []
     found_any_apify = False
 
@@ -336,7 +356,6 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
     else:
         print(f"🍃 Normaler Info-Request für '{query}'. Apify übersprungen.")
 
-    # 3. Ergebnisse kombinieren
     if found_any_apify:
         response_lines.extend(apify_lines)
         return "\n".join(response_lines)
@@ -348,23 +367,41 @@ def dispatcher(query: str, user_id: str, is_shopping: bool = False):
     return "❌ Keine Ergebnisse gefunden."
 
 
-# --- ASYNCHRONER PROZESSOR ---
+# --- ERWEITERTER ASYNCHRONER PROZESSOR MIT SICHERHEITSNETZ ---
 def process_message_async(chat_id, query, message_id, is_shopping):
+    print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
         result_text = dispatcher(query, chat_id, is_shopping)
+        print(f"📋 Dispatcher-Ergebnis für '{query}': {result_text[:50]}...", flush=True)
         
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
-            json={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": result_text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True
-            }
-        )
-    except Exception as e:
-        print(f"Fehler in process_message_async: {e}")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": result_text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+        
+        response = requests.post(url, json=payload, timeout=15)
+        response.raise_for_status()
+        print(f"✅ Telegram-Nachricht {message_id} erfolgreich editiert.", flush=True)
+
+    except Exception as thread_error:
+        print(f"❌ KRITISCHER FEHLER im Hintergrund-Thread: {thread_error}", flush=True)
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": f"❌ Interner Fehler bei der Verarbeitung: `{str(thread_error)}`",
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception:
+            pass
 
 
 # --- FLASK WEBHOOK MIT INTENT-ERKENNUNG ---
@@ -388,7 +425,7 @@ def webhook():
                 
                 if clean_query.lower().startswith("suche "):
                     clean_query = clean_query[6:].strip()
-                    is_shopping = True  # Shopping-Intent aktivieren
+                    is_shopping = True  # Shopping-Intent Flag aktivieren
 
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
