@@ -174,7 +174,6 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
 
-    # URL-SYNTAX-REPARATUR: Tilde (~) zwingend durch Schrägstrich (/) ersetzen für die REST-API v2
     clean_actor_id = actor_id.replace("~", "/")
     url = f"https://api.apify.com/v2/acts/{clean_actor_id}/runs?waitForFinish=0"
 
@@ -183,7 +182,6 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
         "Content-Type": "application/json"
     }
 
-    # Standard-Basis-Payload
     payload = {
         "maxItems": 5,
         "proxyConfiguration": {
@@ -413,11 +411,16 @@ def process_message_async(chat_id, query, message_id, is_shopping):
             pass
 
 
-# --- FLASK WEBHOOK MIT INTENT-ERKENNUNG ---
+# --- FLASK WEBHOOK MIT GET/POST TEST-MODUS ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-@app.route("/webhook", methods=["POST"], strict_slashes=False)
+@app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
 def webhook():
+    # Wenn wir die Seite einfach im Browser aufrufen (GET)
+    if request.method == "GET":
+        return "Webhook-Route ist aktiv und bereit für Telegram! 🚀", 200
+        
+    # Wenn Telegram Daten sendet (POST)
     try:
         data = request.get_json()
         if not data:
@@ -453,5 +456,7 @@ def ping():
     return "Bot is alive!", 200
 
 if __name__ == "__main__":
-    port_val = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port_val)
+    # Holt den Port dynamisch von Render (standardmäßig 10000)
+    port = int(os.environ.get("PORT", 10000))
+    # Startet die App auf 0.0.0.0, damit sie von außen erreichbar ist
+    app.run(host="0.0.0.0", port=port, debug=False)
