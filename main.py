@@ -248,7 +248,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
 
 
 # =====================================================================
-# UNIVERSELLER DATEN-PARSER (Für Amazon & eBay)
+# INTELLIGENTER PLATFORM-PARSER (Maximale Preiskompatibilität)
 # =====================================================================
 def process_platform_results(data, platform_name):
     lines = []
@@ -258,18 +258,21 @@ def process_platform_results(data, platform_name):
         if clean_items:
             lines.append(f"🔹 **{platform_name} Angebote:**")
             for item in clean_items[:3]:
-                # Unterstützt verschiedene JSON-Strukturen für Amazon und eBay
                 title = item.get("title") or item.get("name") or "Produkt"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
                 
-                # Preis-Fallback für unterschiedliche Scraper-Formate
-                price = item.get("priceString") or item.get("price") or item.get("price/value") or "Auf Anfrage"
+                # Maximale Keys abdecken: priceString, price, raw, value, display
+                price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
                 if isinstance(price, dict):
-                    price = price.get("display") or price.get("value") or "Auf Anfrage"
+                    price = price.get("display") or price.get("value") or price.get("raw") or "Auf Anfrage"
                 else:
                     price = str(price)
 
-                link = item.get("url") or item.get("link") or item.get("href") or "#"
+                # Falls der Scraper nur eine reine Zahl liefert (z.B. 81.9), hängen wir das EUR-Zeichen an
+                if price != "Auf Anfrage" and "EUR" not in price and "€" not in price:
+                    price = f"EUR {price}"
+
+                link = item.get("url") or item.get("link") or "#"
                 if link != "#" and link.startswith("/"):
                     link = f"https://amazon.de{link}"
                 
