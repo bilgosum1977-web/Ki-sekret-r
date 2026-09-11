@@ -38,11 +38,11 @@ MAX_HISTORY_LENGTH = 15
 DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 pending_code_updates = {}
 
-# --- APIFY ACTORS ---
+# --- APIFY ACTORS (Deine exakten Favoriten) ---
 APIFY_ACTORS = {
-    "apify_amazon": "junglee/amazon-crawler",
-    "apify_google_shopping": "apify/google-shopping-scraper",
-    "apify_ebay": "maxcopell/ebay-scraper",
+    "apify_amazon": "junglee/free-amazon-product-scraper",
+    "apify_google": "scraperlink/google-search-results-serp-scraper",
+    "apify_ebay": "automation-lab/ebay-scraper",
 }
 
 
@@ -101,7 +101,6 @@ init_db()
 
 # --- USER MODEL & COST LOGIC ---
 def get_user_level(user_id: str) -> str:
-    # Hier kann bei Bedarf die Logik für Pro/VIP-Nutzer erweitert werden
     return "free"
 
 def calculate_price_with_markup(base_cost: float, user_level: str) -> float:
@@ -161,8 +160,6 @@ def execute_final_github_update(chat_id: str) -> str:
     file_path = update_data["file_path"]
     new_content = update_data["new_content"]
     commit_message = update_data["commit_message"]
-    
-    # Direkt ausstehenden Eintrag löschen, um Replay-Angriffe zu verhindern
     del pending_code_updates[str(chat_id)]
 
     token = os.getenv("GITHUB_TOKEN")
@@ -178,7 +175,6 @@ def execute_final_github_update(chat_id: str) -> str:
     api_url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
     
     try:
-        # Bestehende Datei abrufen, um den aktuellen SHA-Wert zu erhalten
         get_res = requests.get(api_url, headers=headers, timeout=5)
         sha = None
         if get_res.status_code == 200:
@@ -203,7 +199,7 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY RUN FUNKTION ---
+# --- APIFY RUN FUNKTION (Mit angepassten Payloads für deine Actors) ---
 def run_apify(source_key: str, query: str):
     if not APIFY_TOKEN:
         raise RuntimeError("APIFY_TOKEN ist leer – bitte in Render eintragen.")
@@ -215,17 +211,30 @@ def run_apify(source_key: str, query: str):
     formatted_actor_id = actor_id.replace('/', '~')
     url = f"https://api.apify.com/v2/acts/{formatted_actor_id}/run-sync?token={APIFY_TOKEN}"
 
-    payload = {
-        "search": query,
-        "keyword": query,
-        "queries": [query],
-        "maxItems": 20
-    }
+    # Spezifische Payloads für deine ausgewählten Actors
+    if source_key == "apify_amazon":
+        payload = {
+            "categoryOrProductUrls": [f"https://www.amazon.de/s?k={query}"],
+            "maxItemsPerStartUrl": 20,
+            "scrapeProductDetails": True
+        }
+    elif source_key == "apify_google":
+        payload = {
+            "queries": [query],
+            "maxPagesPerQuery": 1
+        }
+    else:  # eBay (automation-lab/ebay-scraper)
+        payload = {
+            "search": query,
+            "maxItems": 20
+        }
 
     r = requests.post(url, json=payload, timeout=60)
-    r.raise_for_status()
+    
+    if r.status_code not in [200, 201]:
+        raise RuntimeError(f"Apify HTTP {r.status_code}: {r.text[:300]}")
+        
     data = r.json()
-
     usage = data.get("usage", {})
     usd = float(usage.get("totalUsd", 0.0))
 
@@ -259,16 +268,17 @@ def is_product_query(query: str) -> bool:
         "kaufen", "preis", "kosten", "produkt", "angebot",
         "airpods", "iphone", "samsung", "dyson", "ps5",
         "headset", "kopfhörer", "monitor", "tv", "fernseher",
-        "google shopping", "amazon", "ebay", "suche", "bestellen"
+        "google", "amazon", "ebay", "suche", "bestellen"
     ]
     q = query.lower()
     return any(k in q for k in product_keywords)
 
 def dispatcher(query: str, user_id: str):
     user_level = get_user_level(user_id)
+    apify_errors = []
 
     if is_product_query(query):
-        for src in ["apify_amazon", "apify_google_shopping", "apify_ebay"]:
+        for src in ["apify_amazon", "apify_google", "apify_ebay"]:
             try:
                 apify_data, apify_cost_usd = run_apify(src, query)
                 apify_cost_eur = round(apify_cost_usd, 4)
@@ -299,12 +309,14 @@ def dispatcher(query: str, user_id: str):
                         ),
                     }
             except Exception as e:
-                print(f"CRITICAL APIFY ERROR ({src}): {str(e)}")
-                continue
+                err_str = str(e)
+                print(f"CRITICAL APIFY ERROR ({src}): {err_str}")
+                apify_errors.append(f"{src}: {err_str}")
 
-    # Fallback-Quellen, falls Apify nicht greift
+    # Fallback, falls Apify scheitert
     searxng_res = search_searxng(query)
     ddgs_res = search_ddgs(query)
+    error_details = "\n".join(apify_errors) if apify_errors else "Unbekannter Fehler"
 
     if searxng_res or ddgs_res:
         return {
@@ -314,12 +326,12 @@ def dispatcher(query: str, user_id: str):
             "cost_admin": 0.0,
             "cost_user": 0.0,
             "results": {"searxng": searxng_res, "ddgs": ddgs_res},
-            "message": "Kostenlose Ergebnisse aus SearXNG/DDGS (Apify-Fallback aktiv).",
+            "message": f"⚠️ **Apify fehlgeschlagen, Fallback aktiv!**\n\nDetails:\n{error_details}",
         }
 
     return {
         "status": "error",
-        "message": "Keine Quelle lieferte Ergebnisse (Apify-Fehler und Fallback blieben leer)."
+        "message": f"❌ **Alle Quellen fehlgeschlagen.**\n\nApify Fehler:\n{error_details}"
     }
 
 
@@ -330,7 +342,6 @@ def process_message_async(chat_id: str, user_text: str, loading_msg_id: int):
         url_edit = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
         save_message(chat_id, "user", user_text)
 
-        # Überprüfung auf ausstehende Code-Updates via GitHub-Security
         if str(chat_id) in pending_code_updates:
             if has_required_prefix(user_text) and any(k in u_low for k in ["ja", "ok", "bestätig", "hochladen"]):
                 requests.post(url_edit, json={"chat_id": chat_id, "message_id": loading_msg_id, "text": "⚙️ Lade Code auf GitHub hoch..."})
@@ -340,7 +351,6 @@ def process_message_async(chat_id: str, user_text: str, loading_msg_id: int):
             else:
                 del pending_code_updates[str(chat_id)]
 
-        # Einfache Begrüßung abfangen
         greetings = ["hallo", "hi", "guten morgen", "guten tag", "moin", "servus", "hey"]
         if any(g in u_low for g in greetings):
             requests.post(
@@ -353,7 +363,6 @@ def process_message_async(chat_id: str, user_text: str, loading_msg_id: int):
             )
             return
 
-        # Reguläre Anfrage verarbeiten
         dispatch_res = dispatcher(user_text, chat_id)
         bot_reply = dispatch_res.get("message", "Keine Daten gefunden.")
 
@@ -393,7 +402,6 @@ def webhook():
             chat_id = str(msg["chat"]["id"])
             text = msg.get("text", msg.get("caption", ""))
             if text:
-                # Sofort eine Lade-Nachricht an den Nutzer senden
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage..."}
