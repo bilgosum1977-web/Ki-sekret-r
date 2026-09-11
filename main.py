@@ -5,6 +5,7 @@ import os
 import sqlite3
 import json
 import base64
+import time
 import concurrent.futures
 from flask import Flask, request
 import requests
@@ -38,13 +39,6 @@ MAX_HISTORY_LENGTH = 15
 DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 pending_code_updates = {}
 
-# --- APIFY ACTORS ---
-APIFY_ACTORS = {
-    "apify_amazon": "junglee/free-amazon-product-scraper",
-    "apify_google": "scraperlink/google-search-results-serp-scraper",
-    "apify_ebay": "automation-lab/ebay-scraper",
-}
-
 
 # --- DATABASE INITIALIZATION & HELPERS ---
 def init_db():
@@ -68,16 +62,6 @@ def init_db():
                 PRIMARY KEY (user_id, fact_key)
             )
         ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS marketplace_demand (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
-                title TEXT,
-                location TEXT,
-                max_price REAL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
         conn.commit()
         conn.close()
     except Exception as e:
@@ -97,20 +81,6 @@ def save_message(user_id, role, content):
         print(f"Error saving message: {e}")
 
 init_db()
-
-
-# --- USER MODEL & COST LOGIC ---
-def get_user_level(user_id: str) -> str:
-    return "free"
-
-def calculate_price_with_markup(base_cost: float, user_level: str) -> float:
-    MARKUP = {
-        "free": 2.0,
-        "pro": 1.5,
-        "vip": 1.0,
-    }
-    multiplier = MARKUP.get(user_level, 2.0)
-    return round(base_cost * multiplier, 4)
 
 
 # --- CODE INTEGRITY & GITHUB UPDATES ---
@@ -199,53 +169,58 @@ def execute_final_github_update(chat_id: str) -> str:
         return f"❌ Schwerwiegender Fehler beim GitHub-Update: {str(e)}"
 
 
-# --- APIFY RUN FUNKTION (Mit 35s Timeout & sicherem JSON-Handling) ---
-def run_apify(source_key: str, query: str):
+# --- ASYNCHRONER APIFY ACTOR MIT POLLING ---
+def run_apify_actor(query: str, actor_id: str = "junglee~free-amazon-product-scraper"):
     if not APIFY_TOKEN:
-        raise RuntimeError("APIFY_TOKEN ist leer – bitte in Render eintragen.")
+        return None
 
-    actor_id = APIFY_ACTORS.get(source_key)
-    if not actor_id:
-        raise ValueError(f"Unbekannter Actor Key: {source_key}")
-        
-    formatted_actor_id = actor_id.replace('/', '~')
-    url = f"https://api.apify.com/v2/acts/{formatted_actor_id}/run-sync?token={APIFY_TOKEN}"
+    url = f"https://api.apify.com/v2/acts/{actor_id}/runs?token={APIFY_TOKEN}&waitForFinish=0"
 
-    if source_key == "apify_amazon":
-        payload = {
-            "categoryOrProductUrls": [f"https://www.amazon.de/s?k={query}"],
-            "maxItemsPerStartUrl": 10,
-            "scrapeProductDetails": False
-        }
-    elif source_key == "apify_google":
-        payload = {
-            "queries": [query],
-            "maxPagesPerQuery": 1
-        }
-    else:  # eBay
-        payload = {
-            "searchQueries": [query],
-            "maxItems": 10
-        }
+    payload = {"maxItems": 5}
+    if "ebay" in actor_id.lower():
+        payload["searchKeyword"] = query
+    elif "google" in actor_id.lower():
+        payload["queries"] = query
+    else:
+        payload["search"] = query
 
-    # Timeout auf 35 Sekunden erhöht, damit der Scraper in Ruhe durchlaufen kann
-    r = requests.post(url, json=payload, timeout=35)
-    
-    if r.status_code not in [200, 201]:
-        raise RuntimeError(f"Apify HTTP {r.status_code}: {r.text[:300]}")
-        
     try:
-        data = r.json()
-    except Exception as json_err:
-        raise RuntimeError(f"Apify ungültige Antwort (kein JSON): {r.text[:300]}") from json_err
+        response = requests.post(url, json=payload, timeout=15)
+        response.raise_for_status()
+        
+        run_data = response.json().get("data", {})
+        run_id = run_data.get("id")
+        dataset_id = run_data.get("defaultDatasetId")
+        
+        if not run_id or not dataset_id:
+            return None
 
-    usage = data.get("usage", {})
-    usd = float(usage.get("totalUsd", 0.0))
+        # Status-Polling (Max. 60 Sekunden warten, alle 5 Sekunden prüfen)
+        status_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
+        
+        for _ in range(12):
+            time.sleep(5)
+            status_response = requests.get(status_url, timeout=10)
+            status_response.raise_for_status()
+            
+            run_status = status_response.json().get("data", {}).get("status")
+            
+            if run_status == "SUCCEEDED":
+                dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={APIFY_TOKEN}"
+                data_response = requests.get(dataset_url, timeout=15)
+                data_response.raise_for_status()
+                return data_response.json()
+                
+            elif run_status in ["FAILED", "ABORTED", "TIMED-OUT"]:
+                return None
+                
+        return None
+    except Exception as e:
+        print(f"Apify Polling Fehler: {e}")
+        return None
 
-    return data, usd
 
-
-# --- FALLBACK SCRAPERS ---
+# --- KOSTENLOSE SUCHMASCHINEN (SearXNG & DuckDuckGo) ---
 def search_searxng(query: str):
     url = f"{SEARXNG_URL}/search?q={query}&format=json"
     try:
@@ -260,82 +235,61 @@ def search_ddgs(query: str):
         return None
     try:
         with DDGS(timeout=5) as ddgs:
-            results = list(ddgs.text(f"{query} preis kaufen", max_results=5))
-            return results
+            return list(ddgs.text(f"{query} preis kaufen", max_results=5))
     except Exception:
         return None
 
 
-# --- DISPATCHER & INTENT RECOGNITION ---
-def is_product_query(query: str) -> bool:
-    product_keywords = [
-        "kaufen", "preis", "kosten", "produkt", "angebot",
-        "airpods", "iphone", "samsung", "dyson", "ps5",
-        "headset", "kopfhörer", "monitor", "tv", "fernseher",
-        "google", "amazon", "ebay", "suche", "bestellen"
-    ]
-    q = query.lower()
-    return any(k in q for k in product_keywords)
-
+# --- SMART DISPATCHER (Zuerst kostenlos, dann Fallback via Apify) ---
 def dispatcher(query: str, user_id: str):
-    user_level = get_user_level(user_id)
-    apify_errors = []
+    # 1. Bevorzuge IMMER zuerst kostenlose Quellen (Parallel)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_searxng = executor.submit(search_searxng, query)
+        future_ddgs = executor.submit(search_ddgs, query)
+        
+        searxng_res = future_searxng.result()
+        ddgs_res = future_ddgs.result()
 
-    if is_product_query(query):
-        for src in ["apify_ebay", "apify_google"]:
-            try:
-                apify_data, apify_cost_usd = run_apify(src, query)
-                apify_cost_eur = round(apify_cost_usd, 4)
-                final_price_for_user = calculate_price_with_markup(apify_cost_eur, user_level)
+    response_lines = [f"🔍 **Suchergebnisse für:** *{query}*\n"]
+    has_results = False
 
-                items = (
-                    apify_data.get("items")
-                    or apify_data.get("results")
-                    or apify_data.get("data")
-                    or apify_data.get("products")
-                    or (apify_data if isinstance(apify_data, list) else None)
-                )
+    if searxng_res:
+        has_results = True
+        response_lines.append("🌐 **SearXNG Treffer (Kostenlos):**")
+        for item in searxng_res[:3]:
+            title = item.get("title", "Kein Titel")
+            link = item.get("url", "#")
+            response_lines.append(f"• [{title}]({link})")
+        response_lines.append("")
 
-                if apify_data is not None:
-                    item_count = len(items) if isinstance(items, list) else "Verfügbar"
-                    return {
-                        "status": "success",
-                        "layer": "paid",
-                        "source": src,
-                        "cost_admin": apify_cost_eur,
-                        "cost_user": final_price_for_user,
-                        "results": items if items else apify_data,
-                        "message": (
-                            f"🚀 **Marktplatz-Daten via {src}**\n\n"
-                            f"Admin-Kosten: {apify_cost_eur} $\n"
-                            f"Dein Preis: {final_price_for_user} $\n"
-                            f"Treffer gefunden: {item_count}."
-                        ),
-                    }
-            except Exception as e:
-                err_str = str(e)
-                print(f"CRITICAL APIFY ERROR ({src}): {err_str}")
-                apify_errors.append(f"{src}: {err_str}")
+    if ddgs_res:
+        has_results = True
+        response_lines.append("🦆 **DuckDuckGo Treffer (Kostenlos):**")
+        for item in ddgs_res[:3]:
+            title = item.get("title", "Kein Titel")
+            body = item.get("body", "")
+            link = item.get("href", "#")
+            response_lines.append(f"• [{title}]({link})\n  _{body[:80]}..._")
+        response_lines.append("")
 
-    searxng_res = search_searxng(query)
-    ddgs_res = search_ddgs(query)
-    error_details = "\n".join(apify_errors) if apify_errors else "Timeout / Unbekannter Fehler"
+    if has_results:
+        return "\n".join(response_lines)
 
-    if searxng_res or ddgs_res:
-        return {
-            "status": "success",
-            "layer": "free",
-            "source": ["searxng", "ddgs"],
-            "cost_admin": 0.0,
-            "cost_user": 0.0,
-            "results": {"searxng": searxng_res, "ddgs": ddgs_res},
-            "message": f"⚠️ **Apify Fehler, Fallback aktiv!**\n\nDetails:\n{error_details}",
-        }
+    # 2. Fallback: Wenn Web-Suche leer bleibt, Apify Amazon Scraper nutzen
+    try:
+        apify_data = run_apify_actor(query)
+        if apify_data and isinstance(apify_data, list):
+            apify_lines = [f"🛒 **Amazon-Ergebnisse (Fallback):** *{query}*\n"]
+            for item in apify_data[:5]:
+                title = item.get("title", "Produkt")
+                price = item.get("price", {}).get("display", item.get("price", "Preis auf Anfrage"))
+                link = item.get("url", "#")
+                apify_lines.append(f"• **{title}**\n  💰 Preis: {price}\n  🔗 [Zum Angebot]({link})\n")
+            return "\n".join(apify_lines)
+    except Exception as e:
+        print(f"Apify Fallback Fehler: {e}")
 
-    return {
-        "status": "error",
-        "message": f"❌ **Alle Quellen fehlgeschlagen.**\n\nApify Fehler:\n{error_details}"
-    }
+    return "❌ Keine Ergebnisse gefunden."
 
 
 # --- ASYNC MESSAGE PROCESSOR ---
@@ -361,13 +315,12 @@ def process_message_async(chat_id: str, user_text: str, loading_msg_id: int):
                 json={
                     "chat_id": chat_id,
                     "message_id": loading_msg_id,
-                    "text": "Guten Tag! Als Marketplace Broker suche ich gerne nach Produkten für dich."
+                    "text": "Guten Tag! Ich durchsuche das Web und Amazon nach Produkten für dich."
                 }
             )
             return
 
-        dispatch_res = dispatcher(user_text, chat_id)
-        bot_reply = dispatch_res.get("message", "Keine Daten gefunden.")
+        bot_reply = dispatcher(user_text, chat_id)
 
         requests.post(
             url_edit,
@@ -407,7 +360,7 @@ def webhook():
             if text:
                 res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage..."}
+                    json={"chat_id": chat_id, "text": "⏳ Suche läuft..."}
                 ).json()
                 
                 lid = res.get("result", {}).get("message_id")
