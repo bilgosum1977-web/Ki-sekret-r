@@ -63,7 +63,7 @@ def init_db():
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Database Initialization Error: {e}")
+        print(f"Database Initialization Error: {e}", flush=True)
 
 def save_message(user_id, role, content):
     try:
@@ -76,7 +76,7 @@ def save_message(user_id, role, content):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Error saving message: {e}")
+        print(f"Error saving message: {e}", flush=True)
 
 init_db()
 
@@ -159,7 +159,7 @@ def execute_final_github_update(chat_id: str) -> str:
             payload["sha"] = sha
             
         put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
-        if put_res.status_code in [201, 200]:
+        if put_res.status_code in [200, 201]:
             return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde auf GitHub aktualisiert."
         else:
             return f"❌ GitHub API Fehler ({put_res.status_code}): {put_res.text[:300]}"
@@ -168,11 +168,10 @@ def execute_final_github_update(chat_id: str) -> str:
 
 
 # =====================================================================
-# 1. APIFY ACTOR STARTEN & POLLING (SHOPPING-MODUS)
+# APIFY ACTOR STARTEN & POLLING (SHOPPING-MODUS)
 # =====================================================================
 def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
-    apify_token = os.getenv("APIFY_TOKEN")
-    if not apify_token:
+    if not APIFY_TOKEN:
         print("❌ Apify-Fehler: APIFY_TOKEN ist nicht gesetzt!", flush=True)
         return None
 
@@ -180,7 +179,7 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
     url = f"https://api.apify.com/v2/acts/{clean_actor_id}/runs?waitForFinish=0"
 
     headers = {
-        "Authorization": f"Bearer {apify_token}",
+        "Authorization": f"Bearer {APIFY_TOKEN}",
         "Content-Type": "application/json"
     }
 
@@ -208,10 +207,13 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
         dataset_id = run_data.get("defaultDatasetId")
         
         if not run_id or not dataset_id:
+            print(f"❌ Fehler: Start-Daten unvollständig für {actor_id}", flush=True)
             return None
 
         status_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
         dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+        
+        print(f"🚀 Scraper {actor_id} erfolgreich gestartet. Starte Polling...", flush=True)
 
         for attempt in range(24):
             time.sleep(5)
@@ -219,12 +221,18 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
             status_response.raise_for_status()
             
             run_status = status_response.json().get("data", {}).get("status")
+            print(f"🤖 [{attempt+1}/24] Actor {actor_id} Status: {run_status}", flush=True)
+            
             if run_status == "SUCCEEDED":
+                print(f"✅ {actor_id} fertig! Hole Dataset-Items...", flush=True)
                 data_response = requests.get(dataset_url, headers=headers, timeout=15)
                 data_response.raise_for_status()
                 return data_response.json()
             elif run_status in ["FAILED", "ABORTED", "TIMED-OUT"]:
+                print(f"⚠️ Apify Actor {actor_id} abgebrochen mit Status: {run_status}.", flush=True)
                 return None
+                
+        print(f"⏱️ Apify Timeout: {actor_id} brauchte länger als 120 Sekunden.", flush=True)
         return None
     except Exception as e:
         print(f"❌ Apify Fehler: {e}", flush=True)
@@ -232,7 +240,7 @@ def run_apify_actor(query: str, actor_id: str = "apify~amazon-crawler"):
 
 
 # =====================================================================
-# 2. DATASET VERARBEITEN & CHAT-MODELL ÜBER GROQ
+# UNIVERSELLER DATEN-PARSER (Für Amazon & eBay)
 # =====================================================================
 def process_amazon_results(data_1):
     apify_lines = []
@@ -242,7 +250,7 @@ def process_amazon_results(data_1):
         clean_items = [i for i in data_1 if i.get("title") or i.get("name")]
         if clean_items:
             found_any_apify = True
-            apify_lines.append("📦 **Gefundene Angebote:**")
+            apify_lines.append("📦 **Angebote:**")
             
             for item in clean_items[:3]:
                 title = item.get("title") or item.get("name") or "Produkt ohne Titel"
@@ -258,37 +266,43 @@ def process_amazon_results(data_1):
                 if link != "#" and link.startswith("/"):
                     link = f"https://amazon.de{link}"
                 
-                apify_lines.append(f"• {title[:50]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
+                apify_lines.append(f"• {title[:50]}...\n  💰 {price} | 🔗 [Zum Shop]({link})")
             apify_lines.append("")
         
-    return "\n".join(apify_lines) if found_any_apify else "⚠️ Produktdaten sind gerade nicht verfügbar."
+    return "\n".join(apify_lines) if found_any_apify else "⚠️ Produktdaten von Amazon/eBay sind gerade nicht verfügbar."
 
-def ask_groq(prompt: str) -> str:
+
+# =====================================================================
+# GROQ KI CHAT-FUNKTION
+# =====================================================================
+def ask_groq(query: str) -> str:
     if not GROQ_API_KEY:
-        return "❌ Groq API-Key ist nicht konfiguriert."
+        return "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt."
     try:
         completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",  # Exaktes Modell auf Groq
+            model="openai/gpt-oss-20b",
             messages=[
-                {"role": "system", "content": "Du bist ein hilfsbereiter, kluger KI-Sekretär und Chat-Partner in Telegram."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "Du bist ein KI-Sekretär. Antworte kurz, präzise und auf Deutsch."},
+                {"role": "user", "content": query}
             ],
-            temperature=0.7,
-            max_tokens=1024
+            timeout=15
         )
         return completion.choices[0].message.content
     except Exception as e:
-        return f"❌ Fehler bei der Groq-Anfrage: {e}"
+        print(f"❌ Groq API Fehler: {e}", flush=True)
+        return f"⚠️ Fehler bei der KI-Verarbeitung: {str(e)}"
 
 
 # =====================================================================
-# 3. TELEGRAM SENDEN (MIT EDIT-UNTERSTÜTZUNG)
+# TELEGRAM SENDEN (MIT EDIT-UNTERSTÜTZUNG & REIN-TEXT FALLBACK)
 # =====================================================================
 def send_telegram_message(chat_id, text, message_id=None):
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ Telegram-Fehler: TELEGRAM_BOT_TOKEN ist nicht gesetzt!", flush=True)
+        return False
+
     if message_id:
-        url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
@@ -297,7 +311,7 @@ def send_telegram_message(chat_id, text, message_id=None):
             "disable_web_page_preview": True
         }
     else:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -307,11 +321,14 @@ def send_telegram_message(chat_id, text, message_id=None):
     
     try:
         response = requests.post(url, json=payload, timeout=10)
+        
         if response.status_code == 400 and "can't parse entities" in response.text:
+            print("⚠️ Markdown-Fehler erkannt. Sende als Klartext-Fallback...", flush=True)
             clean_text = text.replace("**", "").replace("*", "").replace("[", "").replace("]", "")
             payload["text"] = clean_text
             payload.pop("parse_mode", None)
             response = requests.post(url, json=payload, timeout=10)
+            
         response.raise_for_status()
         return True
     except Exception as e:
@@ -323,8 +340,10 @@ def send_telegram_message(chat_id, text, message_id=None):
 def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
-        if is_shopping:
-            send_telegram_message(chat_id, f"⏳ Suche nach Produkten für: *{query}*...", message_id=message_id)
+        if query == "ja" and str(chat_id) == ADMIN_USER_ID:
+            nachricht = execute_final_github_update(chat_id)
+        elif is_shopping:
+            send_telegram_message(chat_id, f"⏳ Suche nach Produkten für: {query}...", message_id=message_id)
             rohdaten = run_apify_actor(query, "apify~amazon-crawler")
             nachricht = process_amazon_results(rohdaten)
         else:
@@ -335,7 +354,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
-        send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
+        send_telegram_message(chat_id, f"❌ Interner Fehler: {str(thread_error)}", message_id=message_id)
 
 
 # --- FLASK WEBHOOK ---
@@ -357,8 +376,15 @@ def webhook():
         
         if raw_text:
             clean_query = raw_text.strip()
-            is_shopping = False
             
+            # Überprüfung auf GitHub-Update-Befehle vom Admin
+            if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
+                command_part = clean_query[len(REQUIRED_PREFIX):].strip()
+                if command_part == "ja":
+                    executor.submit(process_message_async, chat_id, "ja", None, False)
+                return "OK", 200
+
+            is_shopping = False
             lower_text = clean_query.lower()
             search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen "]
             for prefix in search_prefixes:
@@ -367,18 +393,19 @@ def webhook():
                     is_shopping = True
                     break
 
-            bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-            res = requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": "⏳ Nachricht empfangen...", "parse_mode": "Markdown"}
-            ).json()
-            
-            lid = res.get("result", {}).get("message_id")
-            if lid:
-                executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping)
+            # Sofortige "In Bearbeitung"-Nachricht senden
+            if TELEGRAM_BOT_TOKEN:
+                res = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": "⏳ Nachricht empfangen...", "parse_mode": "Markdown"}
+                ).json()
+                
+                lid = res.get("result", {}).get("message_id")
+                if lid:
+                    executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping)
                 
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Webhook error: {e}", flush=True)
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
