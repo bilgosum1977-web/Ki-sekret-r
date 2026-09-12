@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -521,13 +521,13 @@ def execute_final_github_update(chat_id: str) -> str:
 # =====================================================================
 # APIFY ACTOR STARTEN & POLLING (SHOPPING-MODUS)
 # =====================================================================
-def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
+def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_items: int = 50):
     if not APIFY_TOKEN:
         return None
 
     url = f"https://api.apify.com/v2/acts/{actor_id}/runs?waitForFinish=0"
     headers = {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
-    payload = {"maxItems": 5, "proxyConfiguration": {"useApifyProxy": True}}
+    payload = {"maxItems": max_items, "proxyConfiguration": {"useApifyProxy": True}}
     
     actor_id_lower = actor_id.lower()
     if "ebay" in actor_id_lower:
@@ -536,7 +536,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler"):
     elif "amazon" in actor_id_lower:
         encoded_query = requests.utils.quote(query)
         payload["categoryOrProductUrls"] = [{"url": f"https://amazon.de/s?k={encoded_query}"}]
-        payload["maxItemsPerStartUrl"] = 3
+        payload["maxItemsPerStartUrl"] = max_items
     else:
         payload["search"] = query
 
@@ -573,7 +573,7 @@ def process_platform_results(data, platform_name):
         clean_items = [i for i in data if i.get("title") or i.get("name")]
         if clean_items:
             lines.append(f"🔹 **{platform_name} Angebote:**")
-            for item in clean_items[:3]:
+            for item in clean_items[:5]:
                 title = item.get("title") or item.get("name") or "Produkt"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
                 raw_price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
@@ -607,7 +607,7 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
             "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
             "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
-            "WICHTIG für Buttons: Erstelle 2 bis 4 kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen (z.B. bei Medien-Uploads passend zum analysierten Inhalt wie Text extrahieren, Preis prüfen etc.), damit sie auf dem Handydisplay nicht abgeschnitten werden! "
+            "WICHTIG für Buttons: Erstelle 2 bis 4 kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen, damit sie auf dem Handydisplay nicht abgeschnitten werden! "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
             "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
@@ -707,7 +707,7 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR
+# ASYNCHRONER PROZESSOR (DIE ZENTRALE / CHEF-KOORDINATOR)
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
@@ -751,8 +751,86 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
                 return
 
+        # =====================================================================
+        # 1. CALLBACK HANDLER (BUTTON-KLICKE & FREEMIUM LIVE-SUCHE PRO)
+        # =====================================================================
         if is_callback:
-            if query == "wetter" or "wetter" in lower_q:
+            
+            # --- A) SCHRITT 1: INFO & CONSENT FÜR LIVE-SUCHE (PRO) ---
+            if query.startswith("live_search_pro_") or query == "live_search_pro":
+                # Letzte echte Suchanfrage des Nutzers aus dem Verlauf holen als Ziel
+                last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
+                
+                max_items = 50  # Limit zur Kostenkontrolle
+                
+                # Dynamische Preiskalkulation: Einkaufskosten bei Apify schätzen + Marge draufrechnen
+                einkaufspreis = (max_items / 1000) * 5.00  # z.B. 5$ pro 1000 Items
+                verkaufspreis = einkaufspreis * 2.0         # Marge x2 (Verdopplung)
+                verkaufspreis = max(0.05, round(verkaufspreis * 20) / 20) # Auf Cent-Runden, min. 0.05€
+
+                nachricht = (
+                    "💎 **Premium Live-Suche (Pro) – Ihre Vorteile:**\n\n"
+                    "• **Echtzeit-Daten:** Umgeht den Cache und lädt frische Daten direkt vom Live-Server.\n"
+                    "• **Präzision:** Liefert dir die exakten Top-Ergebnisse ohne Verzögerung.\n\n"
+                    f"💰 **Kosten für diesen Abruf:** {verkaufspreis:.2f} €\n\n"
+                    "Möchten Sie die Live-Suche jetzt starten?"
+                )
+                buttons = [
+                    {"text": f"✅ Akzeptieren ({verkaufspreis:.2f} €)", "callback": f"execute_live_pro_{last_query}"},
+                    {"text": "❌ Abbrechen", "callback": "restart"}
+                ]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
+            # --- B) SCHRITT 2: EXECUTION NACH NUTZER-BESTÄTIGUNG (APIFY START) ---
+            elif query.startswith("execute_live_pro_"):
+                target_query = query.replace("execute_live_pro_", "").strip()
+                
+                loading_msg = f"🚀 Starte Live-Suche (Pro) für '{target_query}' im Hintergrund..."
+                send_telegram_message(chat_id, loading_msg, message_id=message_id)
+                
+                # Vorarbeit der Zentrale: Apify-Scraper mit festem Limit (50 Items) anwerfen
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
+                    future_amazon = sub_executor.submit(run_apify_actor, target_query, "junglee~amazon-crawler", 50)
+                    future_ebay = sub_executor.submit(run_apify_actor, target_query, "automation-lab~ebay-scraper", 50)
+                    try:
+                        amazon_data = future_amazon.result(timeout=120)
+                    except Exception:
+                        amazon_data = None
+                    try:
+                        ebay_data = future_ebay.result(timeout=120)
+                    except Exception:
+                        ebay_data = None
+
+                if amazon_data:
+                    speichere_produkte(target_query, amazon_data, "Amazon")
+                if ebay_data:
+                    speichere_produkte(target_query, ebay_data, "eBay")
+
+                final_lines = [f"💎 **Live-Suche (Pro) Ergebnisse für '{target_query}':**\n"]
+                final_lines.extend(process_platform_results(amazon_data, "Amazon"))
+                final_lines.extend(process_platform_results(ebay_data, "eBay"))
+                final_lines = [line for line in final_lines if line.strip()]
+                
+                if len(final_lines) <= 1:
+                    nachricht = "⚠️ Aktuell keine Live-Angebote gefunden."
+                    buttons = [{"text": "🔄 Neustart", "callback": "restart"}]
+                else:
+                    raw_text_for_groq = "\n".join(final_lines)
+                    # Gang zu Groq: Rohdaten aufbereiten lassen
+                    prompt = f"Hier sind die frischen Live-Daten der Pro-Suche:\n{raw_text_for_groq}\n\nBereite sie für den Nutzer übersichtlich und sauber auf."
+                    groq_result = ask_groq(chat_id, prompt)
+                    nachricht = groq_result["antwort_text"]
+                    buttons = groq_result["buttons"]
+
+                source_info = "Apify Live-Suche (Pro) ausgeführt"
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+                return
+
+            # --- C) WEITERE CALLBACKS (Wetter, Termine, Standard) ---
+            elif any(w in lower_q for w in ["wetter", "mehr infos", "details", "wetterkarte"]):
                 location = get_user_fact(chat_id, "location")
                 if not location:
                     nachricht = "📍 **Standort fehlt!**\n\nBitte antworte mir im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
@@ -760,8 +838,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 else:
                     raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
                     clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
-                    source_info = f"Wetter-Live-Suche für {location}"
-                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
+                    source_info = f"Wetter-Live-Suche für {location} (via Button)"
+                    groq_result = ask_groq(chat_id, f"Gib mir ausführliche Wetter-Details und eine Vorhersage für {location}.", web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
                     buttons = groq_result["buttons"]
             elif "termin" in lower_q or "buchen" in lower_q or "tour" in lower_q:
@@ -777,6 +855,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
 
+        # =====================================================================
+        # 2. MEDIA HANDLER (BILDER, VIDEOS, VISION)
+        # =====================================================================
         elif media_type and file_id:
             local_path = download_telegram_file(file_id)
             if not local_path:
@@ -800,7 +881,13 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
 
+        # =====================================================================
+        # 3. SHOPPING-MODUS & CACHE PRÜFUNG (STANDARD)
+        # =====================================================================
         elif is_shopping:
+            # Letzte Anfrage im Profil speichern, falls der Nutzer Pro-Suche wählen will
+            set_user_fact(chat_id, "last_user_query", query)
+
             if in_db_vorhanden(query):
                 source_info = "SQLite-Cache"
                 db_produkte = hole_aus_db(query)
@@ -810,11 +897,11 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     final_lines.append(f"• [{shop}] {name[:45]}...\n  💰 *{preis}* | 🔗 [Shop]({url})")
                 nachricht = "\n".join(final_lines)
                 buttons = [
-                    {"text": "🔄 Neu suchen", "callback": f"search_{query}"},
-                    {"text": "📉 Günstiger", "callback": "cheaper_alt"}
+                    {"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"},
+                    {"text": "🔄 Neu suchen", "callback": f"search_{query}"}
                 ]
             else:
-                source_info = "Apify Live-Scraper"
+                source_info = "Apify Live-Scraper (Standard)"
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
                     future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
                     future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
@@ -842,10 +929,13 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 else:
                     nachricht = "\n".join(final_lines)
                     buttons = [
-                        {"text": "⭐ Top-Bewertung", "callback": "filter_top"},
-                        {"text": "🔄 Andere Kat.", "callback": "new_search"}
+                        {"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"},
+                        {"text": "⭐ Top-Bewertung", "callback": "filter_top"}
                     ]
 
+        # =====================================================================
+        # 4. NORMALE TEXT-NACHRICHTEN & FAKTEN-ABFRAGE
+        # =====================================================================
         else:
             clean_q = query.lower().strip()
             if "wetter" in clean_q:
