@@ -10,8 +10,9 @@ import concurrent.futures
 from flask import Flask, request
 import requests
 from groq import Groq
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Sicherer Import für DuckDuckGo Search (ddgs)
+# Sicherer Import für DuckDuckGo Search (ddgs) & SearXNG Vorbereitung
 try:
     from ddgs import DDGS
 except ImportError:
@@ -78,11 +79,29 @@ def save_message(user_id, role, content):
     except Exception as e:
         print(f"Error saving message: {e}", flush=True)
 
+def get_chat_history(user_id, limit=10):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT role, content FROM messages
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        ''', (str(user_id), limit))
+        rows = cursor.fetchall()
+        conn.close()
+        history = [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+        return history
+    except Exception as e:
+        print(f"Error fetching history: {e}", flush=True)
+        return []
+
 init_db()
 
 
 # =====================================================================
-# PRODUKTE DATENBANK
+# PRODUKTE DATENBANK & AUTOPILOT
 # =====================================================================
 
 def init_produkte_db():
@@ -178,7 +197,53 @@ def speichere_produkte(kategorie, data, shop):
     except Exception as e:
         print(f"❌ Fehler beim Speichern: {e}", flush=True)
 
+def clean_old_database_records():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM produkte WHERE datum < datetime('now', '-30 days')")
+        conn.commit()
+        conn.close()
+        print("🧹 SQLite: Daten älter als 30 Tage erfolgreich bereinigt (Rolling Window).", flush=True)
+    except Exception as e:
+        print(f"❌ Fehler bei der DB-Bereinigung: {e}", flush=True)
+
+def daily_autopilot_job():
+    print("🤖 Autopilot gestartet: Aktualisiere Produkt-Historie...", flush=True)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT kategorie FROM produkte")
+        kategorien = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        for kat in kategorien:
+            print(f"🔄 Autopilot aktualisiert: {kat}", flush=True)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
+                future_amazon = sub_executor.submit(run_apify_actor, kat, "junglee~amazon-crawler")
+                future_ebay = sub_executor.submit(run_apify_actor, kat, "automation-lab~ebay-scraper")
+                
+                amazon_data = future_amazon.result()
+                ebay_data = future_ebay.result()
+
+            if amazon_data:
+                speichere_produkte(kat, amazon_data, "Amazon")
+            if ebay_data:
+                speichere_produkte(kat, ebay_data, "eBay")
+                
+            time.sleep(3)
+
+        clean_old_database_records()
+        print("✅ Autopilot-Durchlauf vollständig abgeschlossen!", flush=True)
+    except Exception as e:
+        print(f"❌ Fehler im Autopilot-Job: {e}", flush=True)
+
 init_produkte_db()
+
+# Scheduler im Hintergrund starten (läuft einmal täglich)
+scheduler = BackgroundScheduler()
+scheduler.add_job(daily_autopilot_job, 'interval', days=1)
+scheduler.start()
 
 
 # --- CODE INTEGRITY & GITHUB UPDATES ---
@@ -364,9 +429,9 @@ def process_platform_results(data, platform_name):
                         raw_price.get("raw") or 
                         "Auf Anfrage"
                     )
-                    price = str(price)  # ← Hier wird der Dict-Wert sicher zum String!
+                    price = str(price)
                 else:
-                    price = str(raw_price)  # ✅ bereits ok
+                    price = str(raw_price)
 
                 if price != "Auf Anfrage" and "EUR" not in price and "€" not in price:
                     price = f"EUR {price}"
@@ -381,18 +446,31 @@ def process_platform_results(data, platform_name):
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION
+# GROQ KI CHAT-FUNKTION (MIT CHAT-GEDÄCHTNIS)
 # =====================================================================
-def ask_groq(query: str) -> str:
+def ask_groq(chat_id: str, query: str) -> str:
     if not GROQ_API_KEY:
         return "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt."
     try:
+        history = get_chat_history(chat_id, limit=10)
+        
+        messages = [
+            {
+                "role": "system", 
+                "content": (
+                    "Du bist ein hilfreicher KI-Sekretär. Das heutige Datum ist Samstag, der 12. September 2026. "
+                    "Antworte kurz, präzise und auf Deutsch. Beachte den bisherigen Gesprächsverlauf, falls der Nutzer "
+                    "sich auf vorherige Themen (wie Produkte oder Fragen) bezieht."
+                )
+            }
+        ]
+        
+        messages.extend(history)
+        messages.append({"role": "user", "content": query})
+
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": "Du bist ein KI-Sekretär. Antworte kurz, präzise und auf Deutsch."},
-                {"role": "user", "content": query}
-            ],
+            messages=messages,
             timeout=15
         )
         return completion.choices[0].message.content
@@ -444,13 +522,19 @@ def send_telegram_message(chat_id, text, message_id=None):
         return False
 
 
-# --- ASYNCHRONER PROZESSOR MIT DATENBANK-CHECK ---
+# --- ASYNCHRONER PROZESSOR MIT DATENBANK-CHECK & GEDÄCHTNIS ---
 def process_message_async(chat_id, query, message_id, is_shopping):
     print(f"🔄 Thread gestartet für Chat {chat_id} mit Query: '{query}' (Shopping: {is_shopping})", flush=True)
     try:
+        save_message(chat_id, "user", query)
+
+        # Quelle für das Admin-Debug definieren
+        source_info = ""
+
         if is_shopping:
             if in_db_vorhanden(query):
-                send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** für: *{query}*", message_id=message_id)
+                source_info = "SQLite-Cache (24h Fenster)"
+                send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** for: *{query}*", message_id=message_id)
                 db_produkte = hole_aus_db(query)
                 
                 final_lines = ["🛍️ **Dein Produkt-Vergleich (aus Cache):**\n"]
@@ -461,6 +545,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
                 nachricht = "\n".join(final_lines)
             
             else:
+                source_info = "Apify (Live-Scraper: Amazon & eBay)"
                 send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
@@ -489,11 +574,21 @@ def process_message_async(chat_id, query, message_id, is_shopping):
         else:
             send_telegram_message(chat_id, f"🧠 Denk nach...", message_id=message_id)
             if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+                source_info = "GitHub Self-Update Executor"
                 nachricht = execute_final_github_update(chat_id)
             else:
-                nachricht = ask_groq(query)
+                source_info = "Groq KI (Modell: openai/gpt-oss-20b mit SQLite-Chatgedächtnis)"
+                nachricht = ask_groq(chat_id, query)
 
-        send_telegram_message(chat_id, nachricht, message_id=message_id)
+        # Speichere saubere Nachricht ins Bot-Gedächtnis
+        save_message(chat_id, "assistant", nachricht)
+
+        # Wenn Admin: Admin-Debug-Footer anhängen
+        final_message_to_send = nachricht
+        if str(chat_id) == ADMIN_USER_ID:
+            final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Wer spricht: Bot (Admin-Modus)\n• Herkunft/Quelle: {source_info}"
+
+        send_telegram_message(chat_id, final_message_to_send, message_id=message_id)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
