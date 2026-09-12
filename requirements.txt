@@ -5,6 +5,7 @@ Pillow
 onnxruntime
 ddgs
 geopy
+apscheduler
 
 
 
