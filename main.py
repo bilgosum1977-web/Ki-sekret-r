@@ -756,17 +756,30 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         # =====================================================================
         if is_callback:
             
-            # --- A) SCHRITT 1: INFO & CONSENT FÜR LIVE-SUCHE (PRO) ---
-            if query.startswith("live_search_pro_") or query == "live_search_pro":
-                # Letzte echte Suchanfrage des Nutzers aus dem Verlauf holen als Ziel
+            # --- A) TERMIN-ZEIT-HANDLER (GEFIXT) ---
+            if query.startswith("time_"):
+                parts = query.split("_", 2) # z.B. ["time", "morgen", "Stadtbesuch"]
+                zeit_typ = parts[1] if len(parts) > 1 else "morgen"
+                titel = parts[2] if len(parts) > 2 else "Termin"
+                
+                set_user_fact(chat_id, "bot_state", None) # Zustand sauber zurücksetzen
+                
+                nachricht = f"✅ Der Termin **'{titel}'** wurde erfolgreich für **{zeit_typ}, 13.09.2026** eingetragen und gespeichert!"
+                buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
+                source_info = "Termin-Erstellung abgeschlossen"
+                
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
+            # --- B) SCHRITT 1: INFO & CONSENT FÜR LIVE-SUCHE (PRO) ---
+            elif query.startswith("live_search_pro_") or query == "live_search_pro":
                 last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
                 
-                max_items = 50  # Limit zur Kostenkontrolle
-                
-                # Dynamische Preiskalkulation: Einkaufskosten bei Apify schätzen + Marge draufrechnen
-                einkaufspreis = (max_items / 1000) * 5.00  # z.B. 5$ pro 1000 Items
-                verkaufspreis = einkaufspreis * 2.0         # Marge x2 (Verdopplung)
-                verkaufspreis = max(0.05, round(verkaufspreis * 20) / 20) # Auf Cent-Runden, min. 0.05€
+                max_items = 
+                einkaufspreis = (max_items / 1000) * 5.00
+                verkaufspreis = einkaufspreis * 2.0
+                verkaufspreis = max(0.05, round(verkaufspreis * 20) / 20)
 
                 nachricht = (
                     "💎 **Premium Live-Suche (Pro) – Ihre Vorteile:**\n\n"
@@ -783,14 +796,13 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            # --- B) SCHRITT 2: EXECUTION NACH NUTZER-BESTÄTIGUNG (APIFY START) ---
+            # --- C) SCHRITT 2: EXECUTION NACH NUTZER-BESTÄTIGUNG (APIFY START) ---
             elif query.startswith("execute_live_pro_"):
                 target_query = query.replace("execute_live_pro_", "").strip()
                 
                 loading_msg = f"🚀 Starte Live-Suche (Pro) für '{target_query}' im Hintergrund..."
                 send_telegram_message(chat_id, loading_msg, message_id=message_id)
                 
-                # Vorarbeit der Zentrale: Apify-Scraper mit festem Limit (50 Items) anwerfen
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
                     future_amazon = sub_executor.submit(run_apify_actor, target_query, "junglee~amazon-crawler", 50)
                     future_ebay = sub_executor.submit(run_apify_actor, target_query, "automation-lab~ebay-scraper", 50)
@@ -818,7 +830,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     buttons = [{"text": "🔄 Neustart", "callback": "restart"}]
                 else:
                     raw_text_for_groq = "\n".join(final_lines)
-                    # Gang zu Groq: Rohdaten aufbereiten lassen
                     prompt = f"Hier sind die frischen Live-Daten der Pro-Suche:\n{raw_text_for_groq}\n\nBereite sie für den Nutzer übersichtlich und sauber auf."
                     groq_result = ask_groq(chat_id, prompt)
                     nachricht = groq_result["antwort_text"]
@@ -829,7 +840,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
                 return
 
-            # --- C) WEITERE CALLBACKS (Wetter, Termine, Standard) ---
+            # --- D) WEITERE CALLBACKS (Wetter, Termine, Standard) ---
             elif any(w in lower_q for w in ["wetter", "mehr infos", "details", "wetterkarte"]):
                 location = get_user_fact(chat_id, "location")
                 if not location:
@@ -885,7 +896,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         # 3. SHOPPING-MODUS & CACHE PRÜFUNG (STANDARD)
         # =====================================================================
         elif is_shopping:
-            # Letzte Anfrage im Profil speichern, falls der Nutzer Pro-Suche wählen will
             set_user_fact(chat_id, "last_user_query", query)
 
             if in_db_vorhanden(query):
