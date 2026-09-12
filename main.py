@@ -331,8 +331,10 @@ def master_data_cleaner_and_boss(raw_results, user_query):
 
 
 # =====================================================================
-# PRODUKTE DATENBANK & AUTOPILOT
+# PRODUKTE DATENBANK, ZUBEHÖR-FILTER & AUTOPILOT
 # =====================================================================
+ACCESSOIRE_KEYWORDS = ["hülle", "case", "schutzfolie", "panzerglas", "kabel", "adapter", "halterung", "charger", "tasche"]
+
 def init_produkte_db():
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
@@ -345,6 +347,9 @@ def init_produkte_db():
                 preis TEXT,
                 url TEXT,
                 shop TEXT,
+                image_url TEXT,
+                lieferzeit TEXT,
+                is_accessoire INTEGER DEFAULT 0,
                 datum DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -360,6 +365,7 @@ def in_db_vorhanden(kategorie):
         cursor.execute('''
             SELECT COUNT(*) FROM produkte
             WHERE LOWER(kategorie) = LOWER(?)
+            AND is_accessoire = 0
             AND datum > datetime('now', '-24 hours')
         ''', (kategorie,))
         anzahl = cursor.fetchone()[0]
@@ -369,18 +375,20 @@ def in_db_vorhanden(kategorie):
         print(f"❌ Fehler: {e}", flush=True)
         return False
 
-def hole_aus_db(kategorie):
+def hole_aus_db(kategorie, limit=10, accessories_only=False):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
+        acc_flag = 1 if accessories_only else 0
         cursor.execute('''
-            SELECT name, preis, url, shop
+            SELECT name, preis, url, shop, image_url, lieferzeit
             FROM produkte
             WHERE LOWER(kategorie) = LOWER(?)
+            AND is_accessoire = ?
             AND datum > datetime('now', '-24 hours')
             ORDER BY datum DESC
-            LIMIT 6
-        ''', (kategorie,))
+            LIMIT ?
+        ''', (kategorie, acc_flag, limit))
         produkte = cursor.fetchall()
         conn.close()
         return produkte
@@ -394,19 +402,28 @@ def speichere_produkte(kategorie, data, shop):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
-        for item in data[:5]:
+        for item in data[:15]:
             name = item.get("title") or item.get("name") or "Produkt"
+            
+            # Harter Zubehör-Filter direkt beim Speichern
+            lower_name = name.lower()
+            is_acc = 1 if any(kw in lower_name for kw in ACCESSOIRE_KEYWORDS) else 0
+
             raw_preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
             if isinstance(raw_preis, dict):
                 preis = raw_preis.get("display") or raw_preis.get("value") or raw_preis.get("raw") or "Auf Anfrage"
                 preis = str(preis)
             else:
                 preis = str(raw_preis)
+
             url = item.get("url") or item.get("link") or "#"
+            image_url = item.get("image") or item.get("thumbnail") or item.get("imageUrl") or ""
+            lieferzeit = item.get("delivery") or item.get("shippingText") or "Sofort lieferbar"
+
             cursor.execute('''
-                INSERT INTO produkte (kategorie, name, preis, url, shop)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (kategorie, name, preis, url, shop))
+                INSERT INTO produkte (kategorie, name, preis, url, shop, image_url, lieferzeit, is_accessoire)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (kategorie, name, preis, url, shop, image_url, lieferzeit, is_acc))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -422,8 +439,8 @@ def daily_autopilot_job():
 
         for kat in kategorien:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
-                future_amazon = sub_executor.submit(run_apify_actor, kat, "junglee~amazon-crawler")
-                future_ebay = sub_executor.submit(run_apify_actor, kat, "automation-lab~ebay-scraper")
+                future_amazon = sub_executor.submit(run_apify_actor, kat, "junglee~amazon-crawler", 10)
+                future_ebay = sub_executor.submit(run_apify_actor, kat, "automation-lab~ebay-scraper", 10)
                 
                 try:
                     amazon_data = future_amazon.result(timeout=120)
@@ -521,7 +538,7 @@ def execute_final_github_update(chat_id: str) -> str:
 # =====================================================================
 # APIFY ACTOR STARTEN & POLLING (SHOPPING-MODUS)
 # =====================================================================
-def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_items: int = 50):
+def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_items: int = 10):
     if not APIFY_TOKEN:
         return None
 
@@ -567,34 +584,6 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_it
         return None
 
 
-def process_platform_results(data, platform_name):
-    lines = []
-    if data and isinstance(data, list):
-        clean_items = [i for i in data if i.get("title") or i.get("name")]
-        if clean_items:
-            lines.append(f"🔹 **{platform_name} Angebote:**")
-            for item in clean_items[:5]:
-                title = item.get("title") or item.get("name") or "Produkt"
-                title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
-                raw_price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
-                if isinstance(raw_price, dict):
-                    price = raw_price.get("display") or raw_price.get("value") or raw_price.get("raw") or "Auf Anfrage"
-                    price = str(price)
-                else:
-                    price = str(raw_price)
-
-                if price != "Auf Anfrage" and "EUR" not in price and "€" not in price:
-                    price = f"EUR {price}"
-
-                link = item.get("url") or item.get("link") or "#"
-                if link != "#" and link.startswith("/"):
-                    link = f"https://amazon.de{link}"
-                
-                lines.append(f"• {title[:45]}...\n  💰 *{price}* | 🔗 [Zum Shop]({link})")
-            lines.append("")
-    return lines
-
-
 # =====================================================================
 # GROQ KI CHAT-FUNKTION (ROBUSTER JSON-PARSER & KONTEXT-BUTTONS)
 # =====================================================================
@@ -604,10 +593,10 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     try:
         history = get_chat_history(chat_id, limit=10)
         system_prompt = (
-            "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
+            "Du bist 'Code X', ein proaktiver, präziser Einkaufs-Sekretär in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
             "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
-            "WICHTIG für Buttons: Erstelle 2 bis 4 kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen, damit sie auf dem Handydisplay nicht abgeschnitten werden! "
+            "WICHTIG für Buttons: Erstelle kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen! "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
             "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
@@ -653,9 +642,9 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
 
 
 # =====================================================================
-# TELEGRAM SENDEN (2x2 LAYOUT & FALLBACK-PROTECTION)
+# TELEGRAM SENDEN (BILD MIT CAPTION & INLINE KEYBOARD)
 # =====================================================================
-def send_telegram_message(chat_id, text, message_id=None, buttons=None):
+def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=None, buttons=None):
     if not TELEGRAM_BOT_TOKEN:
         return False
 
@@ -675,6 +664,25 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
             keyboard.append(current_row)
         reply_markup = {"inline_keyboard": keyboard}
 
+    # Wenn Bild vorhanden und valide, sendPhoto nutzen (Visueller Standard)
+    if image_url and image_url.startswith("http") and not message_id:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": chat_id,
+            "photo": image_url,
+            "caption": text,
+            "parse_mode": "Markdown"
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        try:
+            res = requests.post(url, json=payload, timeout=10)
+            if res.status_code == 200:
+                return True
+        except Exception:
+            pass # Fallback auf normalen Text bei Bildfehlern
+
+    # Standard Text-Nachricht (oder editMessage)
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -717,149 +725,224 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         source_info = ""
         buttons = []
         nachricht = ""
-
+        image_to_send = None
         lower_q = query.lower()
 
-        # --- ZUSTANDS-MASCHINE (STATE MACHINE) FÜR LAUFENDE ABLÄUFE ---
+        # --- ZUSTANDS-MASCHINE (STATE MACHINE) ---
         current_state = get_user_fact(chat_id, "bot_state")
         
-        if current_state == "waiting_for_appointment_title":
-            termin_titel = query.strip()
+        # Standort-Zustand abfangen (isolierte Ein-Wort-Antworten)
+        if current_state == "waiting_for_location":
+            loc = query.strip().capitalize()
             set_user_fact(chat_id, "bot_state", None)
+            set_user_fact(chat_id, "location", loc)
             
-            nachricht = f"✅ Termin-Titel gespeichert: **{termin_titel}**\n\nAls Nächstes: Wann soll der Termin stattfinden? (Bitte Datum & Uhrzeit nennen)"
-            buttons = [
-                {"text": "Morgen, 10:00", "callback": f"time_morgen_{termin_titel}"},
-                {"text": "❌ Abbrechen", "callback": "restart"}
-            ]
+            nachricht = f"✅ Dein Standort wurde erfolgreich auf **{loc}** gespeichert!"
+            buttons = [{"text": "🏠 Hauptmenü / Weiter", "callback": "restart"}]
             save_message(chat_id, "assistant", nachricht)
-            send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+            send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
             return
 
-        # Standort-Erkennung
+        # Text-Erkennung für Standort
         if "standort ist" in lower_q or "ich bin in" in lower_q:
-            if "standort ist" in lower_q:
-                loc = query.split("standort ist")[-1].strip().capitalize()
-            else:
-                loc = query.split("ich bin in")[-1].strip().capitalize()
-            
+            loc = query.split("standort ist")[-1].strip().capitalize() if "standort ist" in lower_q else query.split("ich bin in")[-1].strip().capitalize()
             if loc:
                 set_user_fact(chat_id, "location", loc)
                 nachricht = f"✅ Dein Standort wurde auf **{loc}** gespeichert."
                 buttons = [{"text": "🌤️ Wetter prüfen", "callback": "wetter"}]
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
         # =====================================================================
-        # 1. CALLBACK HANDLER (BUTTON-KLICKE & FREEMIUM LIVE-SUCHE PRO)
+        # 1. CALLBACK HANDLER (BUTTON-KLICKE & SHOPPING-FLuss)
         # =====================================================================
         if is_callback:
             
-            # --- A) TERMIN-ZEIT-HANDLER (GEFIXT) ---
-            if query.startswith("time_"):
-                parts = query.split("_", 2) # z.B. ["time", "morgen", "Stadtbesuch"]
-                zeit_typ = parts[1] if len(parts) > 1 else "morgen"
-                titel = parts[2] if len(parts) > 2 else "Termin"
+            # --- A) MENGEN-AUSWAHL (Top 3 vs 10 Ergebnisse) ---
+            if query.startswith("limit_"):
+                parts = query.split("_")
+                limit_num = int(parts[1]) if len(parts) > 1 else 3
+                product_name = get_user_fact(chat_id, "last_user_query") or "Produkt"
                 
-                set_user_fact(chat_id, "bot_state", None) # Zustand sauber zurücksetzen
+                set_user_fact(chat_id, "search_limit", str(limit_num))
                 
-                nachricht = f"✅ Der Termin **'{titel}'** wurde erfolgreich für **{zeit_typ}, 13.09.2026** eingetragen und gespeichert!"
-                buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
-                source_info = "Termin-Erstellung abgeschlossen"
-                
+                # Prüfe DB-Cache zuerst
+                if in_db_vorhanden(product_name):
+                    source_info = f"SQLite-Cache (Top {limit_num})"
+                    produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
+                else:
+                    source_info = f"Apify Live-Suche (Top {limit_num})"
+                    raw_data = run_apify_actor(product_name, "junglee~amazon-crawler", max_items=limit_num)
+                    if raw_data:
+                        speichere_produkte(product_name, raw_data, "Amazon")
+                    produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
+
+                if not produkte:
+                    nachricht = f"⚠️ Keine Angebote für '{product_name}' gefunden."
+                    buttons = [{"text": "🔄 Neu suchen", "callback": "restart"}]
+                else:
+                    # Top-Treffer präsentieren
+                    top_prod = produkte[0]
+                    name, preis, url, shop, image_url, lieferzeit = top_prod
+                    image_to_send = image_url
+                    
+                    location = get_user_fact(chat_id, "location") or "Gelsenkirchen"
+                    
+                    nachricht = (
+                        f"📱 **{name}**\n\n"
+                        f"💰 **Preis:** {preis} | 📦 **Lieferung:** {lieferzeit} nach {location}\n"
+                        f"🛒 **Anbieter:** {shop}\n\n"
+                        f"💡 **Match-Reason (Treffer-Grund):**\n"
+                        f"Exakte Übereinstimmung mit deiner Priorität (Bestpreis & Top-Verfügbarkeit im gewählten Suchumfang von {limit_num} Treffern).\n\n"
+                        f"Wähle eine Option:"
+                    )
+                    buttons = [
+                        {"text": "🛒 Jetzt bestellen", "callback": f"order_now_{url}"},
+                        {"text": "🔄 Andere Optionen", "callback": "show_alternatives"},
+                        {"text": "🔌 Zubehör anzeigen", "callback": f"accessories_{product_name}"}
+                    ]
+
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
-            # --- B) SCHRITT 1: INFO & CONSENT FÜR LIVE-SUCHE (PRO) ---
-            elif query.startswith("live_search_pro_") or query == "live_search_pro":
-                last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
+            # --- B) ALTERNATIVEN ANZEIGEN (On-Demand aus DB) ---
+            elif query == "show_alternatives":
+                product_name = get_user_fact(chat_id, "last_user_query") or "Produkt"
+                produkte = hole_aus_db(product_name, limit=5, accessories_only=False)
                 
-                max_items = 50
-                einkaufspreis = (max_items / 1000) * 5.00
-                verkaufspreis = einkaufspreis * 2.0
-                verkaufspreis = max(0.05, round(verkaufspreis * 20) / 20)
+                if len(produkte) < 2:
+                    nachricht = "ℹ️ Keine weiteren Alternativen im Cache vorhanden."
+                    buttons = [{"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"}]
+                else:
+                    alt_lines = [f"🔄 **Weitere Alternativen für '{product_name}':**\n"]
+                    for p in produkte[1:]:
+                        name, preis, url, shop, _, lieferzeit = p
+                        alt_lines.append(f"• [{shop}] {name[:40]}...\n  💰 *{preis}* | 📦 {lieferzeit} | 🔗 [Zum Shop]({url})")
+                    nachricht = "\n".join(alt_lines)
+                    buttons = [{"text": "🛒 Zurück zum Top-Treffer", "callback": f"limit_{len(produkte)}"}]
 
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
+            # --- C) ZUBEHÖR-LOGIK ---
+            elif query.startswith("accessories_"):
+                product_name = query.replace("accessories_", "").strip()
+                zubehör_query = f"{product_name} Zubehör Hülle Schutzfolie"
+                
+                # Zubehör aus DB oder Live holen
+                z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
+                if not z_produkte:
+                    raw_z = run_apify_actor(zubehör_query, "junglee~amazon-crawler", max_items=5)
+                    if raw_z:
+                        speichere_produkte(product_name, raw_z, "Amazon")
+                    z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
+
+                if not z_produkte:
+                    nachricht = f"⚠️ Aktuell kein passendes Zubehör für '{product_name}' gefunden."
+                    buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
+                else:
+                    top_z = z_produkte[0]
+                    z_name, z_preis, z_url, z_shop, z_image, z_lieferzeit = top_z
+                    image_to_send = z_image
+
+                    nachricht = (
+                        f"🔌 **Top-Zubehör für {product_name}:**\n\n"
+                        f"📦 **{z_name}**\n"
+                        f"💰 **Preis:** {z_preis} | 📦 **Lieferung:** {z_lieferzeit}\n"
+                        f"🛒 **Anbieter:** {z_shop}\n\n"
+                        f"💡 **Match-Reason:** Perfekt kompatibles Qualitäts-Zubehör zum Bestpreis gefiltert.\n"
+                    )
+                    buttons = [
+                        {"text": "🛒 Zubehör bestellen", "callback": f"order_now_{z_url}"},
+                        {"text": "🔄 Andere Optionen", "callback": "show_alternatives"}
+                    ]
+
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
+                return
+
+            # --- D) BESTELLUNG EINLEITEN (Direkter Shop-Link) ---
+            elif query.startswith("order_now_"):
+                shop_url = query.replace("order_now_", "").strip()
                 nachricht = (
-                    "💎 **Premium Live-Suche (Pro) – Ihre Vorteile:**\n\n"
-                    "• **Echtzeit-Daten:** Umgeht den Cache und lädt frische Daten direkt vom Live-Server.\n"
-                    "• **Präzision:** Liefert dir die exakten Top-Ergebnisse ohne Verzögerung.\n\n"
-                    f"💰 **Kosten für diesen Abruf:** {verkaufspreis:.2f} €\n\n"
-                    "Möchten Sie die Live-Suche jetzt starten?"
+                    "🛒 **Bestell-Vorgang vorbereitet!**\n\n"
+                    "Dein ausgewähltes Produkt ist bereit. Klicke auf den Button unten, um den Kauf direkt beim Händler mit 1 Klick abzuschließen:"
                 )
                 buttons = [
-                    {"text": f"✅ Akzeptieren ({verkaufspreis:.2f} €)", "callback": f"execute_live_pro_{last_query}"},
+                    {"text": "🔗 Zum Händler-Checkout", "callback": f"open_link:{shop_url}"},
+                    {"text": "🏠 Hauptmenü", "callback": "restart"}
+                ]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
+            elif query.startswith("open_link:"):
+                target_url = query.replace("open_link:", "").strip()
+                nachricht = f"🔗 **Hier ist dein direkter Link zum Shop:**\n{target_url}\n\nViel Spaß mit deinem Kauf!"
+                buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
+            # --- E) LIVE-SUCHE PRO (Mit Kostenangabe) ---
+            elif query == "live_search_pro":
+                last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
+                verkaufspreis = 0.05
+
+                nachricht = (
+                    "💎 **Premium Live-Suche (Pro) – Kostenlose Info:**\n\n"
+                    "• Lädt frische Live-Daten direkt vom Server.\n"
+                    f"• **Kosten für diesen Abruf:** {verkaufspreis:.2f} € (Hier: Kostenlos im Testmodus)\n\n"
+                    "Möchtest du die Live-Suche jetzt starten?"
+                )
+                buttons = [
+                    {"text": "✅ Live-Suche starten", "callback": f"execute_live_pro_{last_query}"},
                     {"text": "❌ Abbrechen", "callback": "restart"}
                 ]
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            # --- C) SCHRITT 2: EXECUTION NACH NUTZER-BESTÄTIGUNG (APIFY START) ---
             elif query.startswith("execute_live_pro_"):
                 target_query = query.replace("execute_live_pro_", "").strip()
+                send_telegram_photo_or_message(chat_id, f"🚀 Starte Live-Suche für '{target_query}'...", message_id=message_id)
                 
-                loading_msg = f"🚀 Starte Live-Suche (Pro) für '{target_query}' im Hintergrund..."
-                send_telegram_message(chat_id, loading_msg, message_id=message_id)
+                raw_data = run_apify_actor(target_query, "junglee~amazon-crawler", 10)
+                if raw_data:
+                    speichere_produkte(target_query, raw_data, "Amazon")
                 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
-                    future_amazon = sub_executor.submit(run_apify_actor, target_query, "junglee~amazon-crawler", 50)
-                    future_ebay = sub_executor.submit(run_apify_actor, target_query, "automation-lab~ebay-scraper", 50)
-                    try:
-                        amazon_data = future_amazon.result(timeout=120)
-                    except Exception:
-                        amazon_data = None
-                    try:
-                        ebay_data = future_ebay.result(timeout=120)
-                    except Exception:
-                        ebay_data = None
-
-                if amazon_data:
-                    speichere_produkte(target_query, amazon_data, "Amazon")
-                if ebay_data:
-                    speichere_produkte(target_query, ebay_data, "eBay")
-
-                final_lines = [f"💎 **Live-Suche (Pro) Ergebnisse für '{target_query}':**\n"]
-                final_lines.extend(process_platform_results(amazon_data, "Amazon"))
-                final_lines.extend(process_platform_results(ebay_data, "eBay"))
-                final_lines = [line for line in final_lines if line.strip()]
-                
-                if len(final_lines) <= 1:
-                    nachricht = "⚠️ Aktuell keine Live-Angebote gefunden."
-                    buttons = [{"text": "🔄 Neustart", "callback": "restart"}]
-                else:
-                    raw_text_for_groq = "\n".join(final_lines)
-                    prompt = f"Hier sind die frischen Live-Daten der Pro-Suche:\n{raw_text_for_groq}\n\nBereite sie für den Nutzer übersichtlich und sauber auf."
-                    groq_result = ask_groq(chat_id, prompt)
-                    nachricht = groq_result["antwort_text"]
-                    buttons = groq_result["buttons"]
-
-                source_info = "Apify Live-Suche (Pro) ausgeführt"
+                # Weiterleitung zur Mengenauswahl
+                set_user_fact(chat_id, "last_user_query", target_query)
+                nachricht = f"✅ Live-Daten für **'{target_query}'** aktualisiert! Wie viele Ergebnisse möchtest du anzeigen?"
+                buttons = [
+                    {"text": "Top 3 (Empfohlen)", "callback": "limit_3"},
+                    {"text": "10 Ergebnisse", "callback": "limit_10"}
+                ]
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            # --- D) WEITERE CALLBACKS (Wetter, Termine, Standard) ---
-            elif any(w in lower_q for w in ["wetter", "mehr infos", "details", "wetterkarte"]):
-                location = get_user_fact(chat_id, "location")
-                if not location:
-                    nachricht = "📍 **Standort fehlt!**\n\nBitte antworte mir im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
-                    buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
-                else:
-                    raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
-                    source_info = f"Wetter-Live-Suche für {location} (via Button)"
-                    groq_result = ask_groq(chat_id, f"Gib mir ausführliche Wetter-Details und eine Vorhersage für {location}.", web_context=clean_context)
-                    nachricht = groq_result["antwort_text"]
-                    buttons = groq_result["buttons"]
-            elif "termin" in lower_q or "buchen" in lower_q or "tour" in lower_q:
-                set_user_fact(chat_id, "bot_state", "waiting_for_appointment_title")
-                nachricht = f"Um den Termin für **{query}** zu speichern, benötige ich noch ein paar Details. Bitte gib den Titel des Termins an (oder tippe ihn ein)."
+            elif query == "restart":
+                set_user_fact(chat_id, "bot_state", None)
+                nachricht = "🤖 **Hauptmenü:** Hallo! Was möchtest du suchen oder als Einkaufs-Sekretär erledigen lassen? (z. B. *Suche Samsung Galaxy S26*)"
+                buttons = [
+                    {"text": "📍 Standort setzen", "callback": "ask_location"},
+                    {"text": "🌤️ Wetter", "callback": "wetter"}
+                ]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
+            elif query == "ask_location":
+                set_user_fact(chat_id, "bot_state", "waiting_for_location")
+                nachricht = "📍 Bitte antworte jetzt mit deiner Stadt (z. B. *Gelsenkirchen*):"
                 buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
+
             else:
                 source_info = "Button-Interaktion (Callback)"
                 groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button '{query}' geklickt. Reagiere direkt darauf.")
@@ -893,55 +976,26 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 buttons = groq_result["buttons"]
 
         # =====================================================================
-        # 3. SHOPPING-MODUS & CACHE PRÜFUNG (STANDARD)
+        # 3. SHOPPING-MODUS & MENGEN-ABFRAGE START
         # =====================================================================
         elif is_shopping:
             set_user_fact(chat_id, "last_user_query", query)
+            
+            # Prüfen ob Standort gesetzt ist, sonst freundlich nachfragen
+            location = get_user_fact(chat_id, "location")
+            if not location:
+                set_user_fact(chat_id, "bot_state", "waiting_for_location")
+                nachricht = f"🛍️ Du suchst nach **'{query}'**.\n\nBevor wir starten: In welcher Stadt befindest du dich (für lokale Lieferzeit-Berechnung)?"
+                buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
 
-            if in_db_vorhanden(query):
-                source_info = "SQLite-Cache"
-                db_produkte = hole_aus_db(query)
-                final_lines = [f"🛍️ **Produktvergleich für '{query}' (Cache):**\n"]
-                for p in db_produkte:
-                    name, preis, url, shop = p
-                    final_lines.append(f"• [{shop}] {name[:45]}...\n  💰 *{preis}* | 🔗 [Shop]({url})")
-                nachricht = "\n".join(final_lines)
-                buttons = [
-                    {"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"},
-                    {"text": "🔄 Neu suchen", "callback": f"search_{query}"}
-                ]
-            else:
-                source_info = "Apify Live-Scraper (Standard)"
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
-                    future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
-                    future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
-                    try:
-                        amazon_data = future_amazon.result(timeout=120)
-                    except Exception:
-                        amazon_data = None
-                    try:
-                        ebay_data = future_ebay.result(timeout=120)
-                    except Exception:
-                        ebay_data = None
-
-                if amazon_data:
-                    speichere_produkte(query, amazon_data, "Amazon")
-                if ebay_data:
-                    speichere_produkte(query, ebay_data, "eBay")
-
-                final_lines = [f"🛍️ **Produktvergleich für '{query}':**\n"]
-                final_lines.extend(process_platform_results(amazon_data, "Amazon"))
-                final_lines.extend(process_platform_results(ebay_data, "eBay"))
-                final_lines = [line for line in final_lines if line.strip()]
-                
-                if len(final_lines) <= 1:
-                    nachricht = "⚠️ Aktuell keine Angebote gefunden."
-                else:
-                    nachricht = "\n".join(final_lines)
-                    buttons = [
-                        {"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"},
-                        {"text": "⭐ Top-Bewertung", "callback": "filter_top"}
-                    ]
+            nachricht = f"🎯 Suchanfrage für **'{query}'** empfangen.\n\nWie viele Ergebnisse möchtest du für deine Prioritäten-Auswahl sehen?"
+            buttons = [
+                {"text": "Top 3 (Empfohlen)", "callback": "limit_3"},
+                {"text": "10 Ergebnisse", "callback": "limit_10"}
+            ]
 
         # =====================================================================
         # 4. NORMALE TEXT-NACHRICHTEN & FAKTEN-ABFRAGE
@@ -951,8 +1005,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             if "wetter" in clean_q:
                 location = get_user_fact(chat_id, "location")
                 if not location:
-                    nachricht = "📍 **Standort fehlt!**\n\nBitte antworte mit:\n👉 *Mein Standort ist [Deine Stadt]*."
-                    buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
+                    nachricht = "📍 **Standort fehlt!**\n\nBitte setze zuerst deinen Standort."
+                    buttons = [{"text": "📍 Standort setzen", "callback": "ask_location"}]
                 else:
                     raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
                     clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
@@ -960,13 +1014,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
                     buttons = groq_result["buttons"]
-            elif "termin" in clean_q or "buchen" in clean_q:
-                set_user_fact(chat_id, "bot_state", "waiting_for_appointment_title")
-                nachricht = "Um einen Termin zu speichern, benötige ich den Titel. Wie soll der Termin heißen?"
-                buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
-                save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
-                return
             else:
                 smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
                 if clean_q in smalltalk_words or len(clean_q) < 4:
@@ -989,15 +1036,15 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         save_message(chat_id, "assistant", nachricht)
 
         final_message_to_send = nachricht
-        if str(chat_id) == ADMIN_USER_ID:
+        if str(chat_id) == ADMIN_USER_ID and source_info:
             final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Quelle: {source_info}"
 
         target_message_id = None if is_callback else message_id
-        send_telegram_message(chat_id, final_message_to_send, message_id=target_message_id, buttons=buttons)
+        send_telegram_photo_or_message(chat_id, final_message_to_send, image_url=image_to_send, message_id=target_message_id, buttons=buttons)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
-        send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=None)
+        send_telegram_photo_or_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=None)
 
 
 # =====================================================================
@@ -1071,6 +1118,12 @@ def webhook():
                         )
                     return "OK", 200
 
+                # Zustand prüfen (z.B. Standort-Eingabe)
+                current_state = get_user_fact(chat_id, "bot_state")
+                if current_state == "waiting_for_location":
+                    executor.submit(process_message_async, chat_id, clean_query, None, False)
+                    return "OK", 200
+
                 is_shopping = False
                 lower_text = clean_query.lower()
                 search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen "]
@@ -1095,7 +1148,7 @@ def webhook():
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
-def ping():
+def ping":
     return "Bot is alive!", 200
 
 if __name__ == "__main__":
