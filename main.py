@@ -108,6 +108,27 @@ def get_chat_history(user_id, limit=10):
         print(f"Error fetching history: {e}", flush=True)
         return []
 
+def get_user_fact(user_id, fact_key):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        cursor = conn.cursor()
+        cursor.execute('SELECT fact_value FROM user_profile WHERE user_id = ? AND fact_key = ?', (str(user_id), fact_key))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+def set_user_fact(user_id, fact_key, fact_value):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO user_profile (user_id, fact_key, fact_value) VALUES (?, ?, ?)', (str(user_id), fact_key, fact_value))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error setting user fact: {e}", flush=True)
+
 init_db()
 
 
@@ -234,7 +255,7 @@ def fetch_raw_web_data(query, max_results=6):
 # =====================================================================
 TRUSTED_AUTHORITIES = {
     "apple.com", "microsoft.com", "reuters.com", "bloomberg.com", 
-    "heise.de", "golem.de", "t3n.de", "wikipedia.org", "tagesschau.de"
+    "heise.de", "golem.de", "t3n.de", "wikipedia.org", "tagesschau.de", "wetter.com", "dwd.de"
 }
 
 BANNED_SOURCES = {
@@ -586,6 +607,7 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         system_prompt = (
             "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
+            "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
             "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
@@ -697,11 +719,42 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         buttons = []
         nachricht = ""
 
+        lower_q = query.lower()
+
+        # Standort-Erkennung bei Eingaben wie "Mein Standort ist Berlin" oder "Ich bin in München"
+        if "standort ist" in lower_q or "ich bin in" in lower_q:
+            if "standort ist" in lower_q:
+                loc = query.split("standort ist")[-1].strip().capitalize()
+            else:
+                loc = query.split("ich bin in")[-1].strip().capitalize()
+            
+            if loc:
+                set_user_fact(chat_id, "location", loc)
+                nachricht = f"✅ Danke! Dein Standort wurde fest auf **{loc}** gespeichert. Du kannst jetzt das Wetter oder lokale Infos abfragen."
+                buttons = [{"text": "🌤️ Wetter jetzt prüfen", "callback": "wetter"}]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                return
+
         if is_callback:
-            source_info = "Button-Interaktion (Callback)"
-            groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button mit dem Befehl '{query}' geklickt. Reagiere darauf direkt und hilfsbereit.")
-            nachricht = groq_result["antwort_text"]
-            buttons = groq_result["buttons"]
+            if query == "wetter" or "wetter" in lower_q:
+                location = get_user_fact(chat_id, "location")
+                if not location:
+                    nachricht = "📍 **Standort fehlt!**\n\nUm dir echte Wetterdaten und Fakten anzuzeigen, benötige ich deinen Standort.\n\nBitte antworte mir einfach im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
+                    buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
+                else:
+                    send_telegram_message(chat_id, f"🔍 Suche Live-Wetterdaten für deinen Standort: *{location}*...", message_id=message_id)
+                    raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
+                    source_info = f"Wetter-Live-Suche für {location}"
+                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location} basierend auf den Web-Daten.", web_context=clean_context)
+                    nachricht = groq_result["antwort_text"]
+                    buttons = groq_result["buttons"]
+            else:
+                source_info = "Button-Interaktion (Callback)"
+                groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button mit dem Befehl '{query}' geklickt. Reagiere darauf direkt und hilfsbereit.")
+                nachricht = groq_result["antwort_text"]
+                buttons = groq_result["buttons"]
 
         elif media_type and file_id:
             send_telegram_message(chat_id, f"📥 Lade {media_type} herunter und analysiere...", message_id=message_id)
@@ -781,27 +834,43 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
         else:
             clean_q = query.lower().strip()
-            smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
             
-            if clean_q in smalltalk_words or len(clean_q) < 4:
-                source_info = "Direkter Smalltalk"
-                groq_result = ask_groq(chat_id, query)
-                nachricht = groq_result["antwort_text"]
-                buttons = groq_result["buttons"]
-            else:
-                send_telegram_message(chat_id, f"🧠 Analysiere Web-Daten...", message_id=message_id)
-                
-                if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
-                    source_info = "GitHub Self-Update Executor"
-                    nachricht = execute_final_github_update(chat_id)
+            # Prüfen ob gezielt nach Wetter gefragt wird ohne Standort
+            if "wetter" in clean_q:
+                location = get_user_fact(chat_id, "location")
+                if not location:
+                    nachricht = "📍 **Standort fehlt!**\n\nUm dir echte Wetterdaten und Fakten anzuzeigen, benötige ich deinen Standort.\n\nBitte antworte mir einfach im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
+                    buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
                 else:
-                    raw_web_data = fetch_raw_web_data(query)
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                    source_info = "Boss-Filter & Groq Analyse"
-                    
-                    groq_result = ask_groq(chat_id, query, web_context=clean_context)
+                    send_telegram_message(chat_id, f"🔍 Suche Live-Wetterdaten für deinen Standort: *{location}*...", message_id=message_id)
+                    raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
+                    source_info = f"Wetter-Live-Suche für {location}"
+                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location} basierend auf den Web-Daten.", web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
                     buttons = groq_result["buttons"]
+            else:
+                smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
+                
+                if clean_q in smalltalk_words or len(clean_q) < 4:
+                    source_info = "Direkter Smalltalk"
+                    groq_result = ask_groq(chat_id, query)
+                    nachricht = groq_result["antwort_text"]
+                    buttons = groq_result["buttons"]
+                else:
+                    send_telegram_message(chat_id, f"🧠 Analysiere Web-Daten...", message_id=message_id)
+                    
+                    if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+                        source_info = "GitHub Self-Update Executor"
+                        nachricht = execute_final_github_update(chat_id)
+                    else:
+                        raw_web_data = fetch_raw_web_data(query)
+                        clean_context = master_data_cleaner_and_boss(raw_web_data, query)
+                        source_info = "Boss-Filter & Groq Analyse"
+                        
+                        groq_result = ask_groq(chat_id, query, web_context=clean_context)
+                        nachricht = groq_result["antwort_text"]
+                        buttons = groq_result["buttons"]
 
         save_message(chat_id, "assistant", nachricht)
 
