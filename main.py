@@ -446,7 +446,7 @@ def process_platform_results(data, platform_name):
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION (MIT JSON-MODUS & DYNAMISCHEN BUTTONS)
+# GROQ KI CHAT-FUNKTION (FÜR openai/gpt-oss-20b OPTIMIERT)
 # =====================================================================
 def ask_groq(chat_id: str, query: str) -> dict:
     if not GROQ_API_KEY:
@@ -461,14 +461,14 @@ def ask_groq(chat_id: str, query: str) -> dict:
             "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
             "Analysiere die Anfrage des Nutzers. Beachte den bisherigen Gesprächsverlauf. "
-            "Antworte IMMER im folgenden exakten JSON-Format (ohne Markdown-Backticks drumherum, reines JSON):\n"
+            "WICHTIG: Verwende keine Tools oder Funktionsaufrufe. Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne erklärenden Text drumherum:\n"
             "{\n"
-            "  \"antwort_text\": \"Dein formatierter Text für den Chat (nutze Markdown wie *fett*, Emojis, kurze Absätze)\",\n"
+            "  \"antwort_text\": \"Dein formatierter Text für den Chat (nutze Markdown wie *fett*, Emojis)\",\n"
             "  \"buttons\": [\n"
-            "    {\"text\": \"Button-Beschriftung mit Emoji\", \"callback\": \"kurzer_technischer_befehl\"}\n"
+            "    {\"text\": \"Button-Beschriftung\", \"callback\": \"technischer_befehl\"}\n"
             "  ]\n"
             "}\n"
-            "Erstelle 2 bis 4 sinnvolle, kontextabhängige Aktions-Buttons für die nächsten Schritte des Nutzers."
+            "Erstelle 2 bis 4 sinnvolle, kontextabhängige Aktions-Buttons für die nächsten Schritte."
         )
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -478,11 +478,22 @@ def ask_groq(chat_id: str, query: str) -> dict:
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=messages,
-            response_format={"type": "json_object"},
+            temperature=0.3,
             timeout=15
         )
         
-        raw_content = completion.choices[0].message.content
+        raw_content = completion.choices[0].message.content.strip()
+        
+        if "```" in raw_content:
+            parts = raw_content.split("```")
+            for p in parts:
+                p_stripped = p.strip()
+                if p_stripped.startswith("json"):
+                    p_stripped = p_stripped[4:].strip()
+                if p_stripped.startswith("{") and p_stripped.endswith("}"):
+                    raw_content = p_stripped
+                    break
+
         response_data = json.loads(raw_content)
         return {
             "antwort_text": response_data.get("antwort_text", "Hier sind deine Ergebnisse:"),
@@ -490,9 +501,13 @@ def ask_groq(chat_id: str, query: str) -> dict:
         }
     except Exception as e:
         print(f"❌ Groq API/JSON Fehler: {e}", flush=True)
+        fallback_text = completion.choices[0].message.content if 'completion' in locals() and completion.choices else f"⚠️ Fehler: {str(e)}"
         return {
-            "antwort_text": f"⚠️ Fehler bei der KI-Verarbeitung: {str(e)}",
-            "buttons": []
+            "antwort_text": fallback_text,
+            "buttons": [
+                {"text": "🔍 Neuen Begriff eingeben", "callback": "enter_new_query"},
+                {"text": "❌ Abbrechen", "callback": "cancel_search"}
+            ]
         }
 
 
