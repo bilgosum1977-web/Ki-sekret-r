@@ -142,7 +142,6 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
         "• Verpackungs- & Modell-Erkennung: Geprüft.\n"
         "• Sicherheits-Prüfung: Keine offensichtlichen Anomalien oder Fake-Muster im Screenshot erkannt.\n"
     )
-    # Falls OpenCV verfügbar ist, können wir Basisdaten wie Dimensionen ergänzen
     if OPENCV_AVAILABLE:
         try:
             img = cv2.imread(image_path)
@@ -155,8 +154,6 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
 def process_video_and_create_dossier(video_path: str) -> str:
     """Extrahiert Frames aus Videos, führt OCR/Video-Analyse aus und aggregiert Video-Fakten."""
     dossier = "VIDEO-DOSSIER VOM VIDEO-PROZESSOR:\n"
-    extracted_texts = []
-    
     if OPENCV_AVAILABLE:
         try:
             cap = cv2.VideoCapture(video_path)
@@ -166,13 +163,11 @@ def process_video_and_create_dossier(video_path: str) -> str:
             
             dossier += f"• Video-Metadaten: Dauer ~{duration:.1f}s, {frame_count} Frames total.\n"
             
-            # Frame-Extraktion (Beispiel: alle paar Sekunden ein Frame)
-            success, count = True, 0
-            while cap.isOpened() and count < 5: # Maximal 5 Frames analysieren
+            count = 0
+            while cap.isOpened() and count < 5:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                # Hier ließen sich OCR oder visuelle Analysen auf dem Frame ausführen
                 count += 1
             cap.release()
             dossier += f"• Frame-Extraktion & Analyse: {count} Kern-Frames erfolgreich extrahiert und analysiert.\n"
@@ -191,7 +186,6 @@ def process_video_and_create_dossier(video_path: str) -> str:
 def fetch_raw_web_data(query, max_results=6):
     raw_results = []
     
-    # 1. DuckDuckGo (Primär)
     if DDGS:
         try:
             with DDGS() as ddgs:
@@ -206,7 +200,6 @@ def fetch_raw_web_data(query, max_results=6):
         except Exception as e:
             print(f"[Warnung] DuckDuckGo fehlgeschlagen: {e}", flush=True)
 
-    # 2. SearXNG (Ergänzung / Fallback)
     try:
         params = {"q": query, "format": "json"}
         response = requests.get(SEARXNG_URL, params=params, timeout=5)
@@ -261,7 +254,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
         except Exception:
             domain = ""
 
-        # Fake- / Spam-Filter
         if any(banned in domain for banned in BANNED_SOURCES):
             continue
 
@@ -272,7 +264,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
 
         is_official = any(trusted in domain for trusted in TRUSTED_AUTHORITIES)
 
-        # Gerüchte- & Technik-Filter
         combined_text = (title + " " + snippet).lower()
         is_rumor = any(keyword in combined_text for keyword in RUMOR_KEYWORDS)
         
@@ -318,9 +309,8 @@ def master_data_cleaner_and_boss(raw_results, user_query):
 
 
 # =====================================================================
-# PRODUKTE DATENBANK & AUTOPILOT (Dein bestehendes System)
+# PRODUKTE DATENBANK & AUTOPILOT
 # =====================================================================
-
 def init_produkte_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -354,7 +344,6 @@ def in_db_vorhanden(kategorie):
         anzahl = cursor.fetchone()[0]
         conn.close()
         if anzahl >= 3:
-            print(f"✅ '{kategorie}' in DB gefunden!")
             return True
         return False
     except Exception as e:
@@ -613,7 +602,7 @@ def process_platform_results(data, platform_name):
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION (ANTI-BULLSHIT-PROMPT)
+# GROQ KI CHAT-FUNKTION (ROBUSTER JSON-PARSER)
 # =====================================================================
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not GROQ_API_KEY:
@@ -627,23 +616,15 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         system_prompt = (
             "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
-            "Du erhältst vom System streng geprüfte, gefilterte und verifizierte Web‑Daten (Dossier vom Boss‑Filter). "
-            "Du darfst AUSSCHLIESSLICH diese Daten verwenden. "
-            "Du darfst KEIN eigenes Weltwissen benutzen. "
-            "Du darfst NICHT raten, NICHT spekulieren und NICHT halluzinieren. "
-            "Wenn Informationen fehlen, sag klar: „Keine Daten vorhanden.“ "
-            "Wenn etwas ein Gerücht ist, markiere es als Gerücht. "
-            "Wenn etwas bestätigt ist, markiere es als bestätigt. "
-            "Erfinde KEINE Quellen, KEINE Fakten und KEINE Zusammenhänge. "
-            "Analysiere nur the übergebenen Daten und gib eine klare, strukturierte Antwort. "
-            "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne erklärenden Text drumherum:\n"
+            "Du antwortest präzise, klar und strukturiert. "
+            "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke (keine ```json ... ```) und ohne Text drumherum:\n"
             "{\n"
-            "  \"antwort_text\": \"Dein formatierter Text für den Chat (nutze Markdown wie *fett*, Emojis)\",\n"
+            "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
             "  \"buttons\": [\n"
-            "    {\"text\": \"Button-Beschriftung\", \"callback\": \"technischer_befehl\"}\n"
+            "    {\"text\": \"Button-Text\", \"callback\": \"befehl\"}\n"
             "  ]\n"
             "}\n"
-            "Erstelle 2 bis 4 sinnvolle, kontextabhängige Aktions-Buttons für die nächsten Schritte."
+            "Erstelle 2 bis 4 sinnvolle Aktions-Buttons."
         )
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -661,30 +642,28 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         
         raw_content = completion.choices[0].message.content.strip()
         
-        if "```" in raw_content:
-            parts = raw_content.split("```")
+        clean_json = raw_content
+        if "```" in clean_json:
+            parts = clean_json.split("```")
             for p in parts:
-                p_stripped = p.strip()
-                if p_stripped.startswith("json"):
-                    p_stripped = p_stripped[4:].strip()
-                if p_stripped.startswith("{") and p_stripped.endswith("}"):
-                    raw_content = p_stripped
+                p_s = p.strip()
+                if p_s.startswith("json"):
+                    p_s = p_s[4:].strip()
+                if p_s.startswith("{") and p_s.endswith("}"):
+                    clean_json = p_s
                     break
 
-        response_data = json.loads(raw_content)
+        response_data = json.loads(clean_json)
         return {
-            "antwort_text": response_data.get("antwort_text", "Hier sind deine Ergebnisse:"),
+            "antwort_text": response_data.get("antwort_text", raw_content),
             "buttons": response_data.get("buttons", [])
         }
     except Exception as e:
-        print(f"❌ Groq API/JSON Fehler: {e}", flush=True)
-        fallback_text = completion.choices[0].message.content if 'completion' in locals() and completion.choices else f"⚠️ Fehler: {str(e)}"
+        print(f"❌ Groq Parsing Error: {e}", flush=True)
+        fallback = completion.choices[0].message.content if 'completion' in locals() else "⚠️ Verarbeitungsfehler."
         return {
-            "antwort_text": fallback_text,
-            "buttons": [
-                {"text": "🔍 Neuen Begriff eingeben", "callback": "enter_new_query"},
-                {"text": "❌ Abbrechen", "callback": "cancel_search"}
-            ]
+            "antwort_text": fallback,
+            "buttons": [{"text": "🔄 Neu starten", "callback": "restart"}]
         }
 
 
@@ -733,44 +712,52 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
         return False
 
 
-# --- ASYNCHRONER PROZESSOR (MULTIMODAL & WEBPELINE) ---
-def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None):
-    print(f"🔄 Thread gestartet für Chat {chat_id} (Media: {media_type}, Query: '{query}')", flush=True)
+# =====================================================================
+# ASYNCHRONER PROZESSOR (MIT SMALLTALK & CALLBACK SICHERUNG)
+# =====================================================================
+def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
+    print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
     try:
-        save_message(chat_id, "user", query if query else f"[{media_type} Upload]")
+        save_message(chat_id, "user", query if query else f"[{media_type}]")
 
         source_info = ""
         buttons = []
         nachricht = ""
 
-        # 1. Medienverarbeitung (Bild oder Video)
-        if media_type and file_id:
+        # A) Callback Query (Klick auf Button) sauber abfangen
+        if is_callback:
+            source_info = "Button-Interaktion (Callback)"
+            groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button mit dem Befehl '{query}' geklickt. Reagiere darauf direkt und hilfsbereit.")
+            nachricht = groq_result["antwort_text"]
+            buttons = groq_result["buttons"]
+
+        # B) Medienverarbeitung (Bild / Video)
+        elif media_type and file_id:
             send_telegram_message(chat_id, f"📥 Lade {media_type} herunter und analysiere...", message_id=message_id)
             local_path = download_telegram_file(file_id)
             
             if not local_path:
-                nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei von Telegram."
+                nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
             else:
                 if media_type == "image":
                     source_info = "Vision-Pipeline (Bildanalyse, OCR, Fake-Erkennung)"
                     media_dossier = analyze_image_and_create_dossier(local_path)
                 elif media_type == "video":
-                    source_info = "Video-Pipeline (Frame-Extraktion, Fakten-Aggregierung)"
+                    source_info = "Video-Pipeline (Frame-Extraktion)"
                     media_dossier = process_video_and_create_dossier(local_path)
                 else:
                     media_dossier = "Unbekannter Medientyp."
 
-                # Cleanup temp file
                 try:
                     os.remove(local_path)
                 except Exception:
                     pass
 
-                # Übergabe an Groq mit dem Anti-Bullshit-Prompt
                 groq_result = ask_groq(chat_id, query or f"Analysiere dieses {media_type}.", web_context=media_dossier)
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
 
+        # C) Shopping-Modus
         elif is_shopping:
             if in_db_vorhanden(query):
                 source_info = "SQLite-Cache (24h Fenster)"
@@ -813,26 +800,37 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                         {"text": "⭐ Nur Top-Bewertungen", "callback": "filter_top"},
                         {"text": "🔄 Andere Kategorie", "callback": "new_search"}
                     ]
+
+        # D) Normaler Text / Smalltalk vs Websuche
         else:
-            send_telegram_message(chat_id, f"🧠 Analysiere Web-Daten...", message_id=message_id)
+            clean_q = query.lower().strip()
+            smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
             
-            if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
-                source_info = "GitHub Self-Update Executor"
-                nachricht = execute_final_github_update(chat_id)
-            else:
-                raw_web_data = fetch_raw_web_data(query)
-                clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                source_info = "Groq KI (Analysiert gefilterte Boss-Daten)"
-                
-                groq_result = ask_groq(chat_id, query, web_context=clean_context)
+            if clean_q in smalltalk_words or len(clean_q) < 4:
+                source_info = "Direkter Smalltalk (Keine Websuche nötig)"
+                groq_result = ask_groq(chat_id, query)
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
+            else:
+                send_telegram_message(chat_id, f"🧠 Analysiere Web-Daten...", message_id=message_id)
+                
+                if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+                    source_info = "GitHub Self-Update Executor"
+                    nachricht = execute_final_github_update(chat_id)
+                else:
+                    raw_web_data = fetch_raw_web_data(query)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, query)
+                    source_info = "Boss-Filter & Groq Analyse"
+                    
+                    groq_result = ask_groq(chat_id, query, web_context=clean_context)
+                    nachricht = groq_result["antwort_text"]
+                    buttons = groq_result["buttons"]
 
         save_message(chat_id, "assistant", nachricht)
 
         final_message_to_send = nachricht
         if str(chat_id) == ADMIN_USER_ID:
-            final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Pipeline: Vollständig aktiv\n• Quelle: {source_info}"
+            final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Quelle: {source_info}"
 
         send_telegram_message(chat_id, final_message_to_send, message_id=message_id, buttons=buttons)
 
@@ -841,7 +839,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
 
 
-# --- FLASK WEBHOOK ---
+# =====================================================================
+# FLASK WEBHOOK
+# =====================================================================
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 @app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
@@ -854,6 +854,7 @@ def webhook():
         if not data:
             return "OK", 200
 
+        # Klick auf Inline-Buttons (Callback Query) sauber abfangen
         if "callback_query" in data:
             cq = data["callback_query"]
             cq_id = cq["id"]
@@ -861,9 +862,10 @@ def webhook():
             callback_data = cq["data"]
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            executor.submit(process_message_async, chat_id, f"Nutzer hat Button geklickt: {callback_data}", None, False, None, None)
+            executor.submit(process_message_async, chat_id, callback_data, None, False, is_callback=True)
             return "OK", 200
 
+        # Normale Text- oder Mediennachrichten
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
