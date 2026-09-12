@@ -6,6 +6,6 @@ onnxruntime
 ddgs
 geopy
 apscheduler
-
+opencv-python-headless
 
 
