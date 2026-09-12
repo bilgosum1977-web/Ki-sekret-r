@@ -446,64 +446,89 @@ def process_platform_results(data, platform_name):
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION (MIT CHAT-GEDÄCHTNIS)
+# GROQ KI CHAT-FUNKTION (MIT JSON-MODUS & DYNAMISCHEN BUTTONS)
 # =====================================================================
-def ask_groq(chat_id: str, query: str) -> str:
+def ask_groq(chat_id: str, query: str) -> dict:
     if not GROQ_API_KEY:
-        return "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt."
+        return {
+            "antwort_text": "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt.",
+            "buttons": []
+        }
     try:
         history = get_chat_history(chat_id, limit=10)
         
-        messages = [
-            {
-                "role": "system", 
-                "content": (
-                    "Du bist ein hilfreicher KI-Sekretär. Das heutige Datum ist Samstag, der 12. September 2026. "
-                    "Antworte kurz, präzise und auf Deutsch. Beachte den bisherigen Gesprächsverlauf, falls der Nutzer "
-                    "sich auf vorherige Themen (wie Produkte oder Fragen) bezieht."
-                )
-            }
-        ]
+        system_prompt = (
+            "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
+            "Das heutige Datum ist Samstag, der 12. September 2026. "
+            "Analysiere die Anfrage des Nutzers. Beachte den bisherigen Gesprächsverlauf. "
+            "Antworte IMMER im folgenden exakten JSON-Format (ohne Markdown-Backticks drumherum, reines JSON):\n"
+            "{\n"
+            "  \"antwort_text\": \"Dein formatierter Text für den Chat (nutze Markdown wie *fett*, Emojis, kurze Absätze)\",\n"
+            "  \"buttons\": [\n"
+            "    {\"text\": \"Button-Beschriftung mit Emoji\", \"callback\": \"kurzer_technischer_befehl\"}\n"
+            "  ]\n"
+            "}\n"
+            "Erstelle 2 bis 4 sinnvolle, kontextabhängige Aktions-Buttons für die nächsten Schritte des Nutzers."
+        )
         
+        messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": query})
 
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=messages,
+            response_format={"type": "json_object"},
             timeout=15
         )
-        return completion.choices[0].message.content
+        
+        raw_content = completion.choices[0].message.content
+        response_data = json.loads(raw_content)
+        return {
+            "antwort_text": response_data.get("antwort_text", "Hier sind deine Ergebnisse:"),
+            "buttons": response_data.get("buttons", [])
+        }
     except Exception as e:
-        print(f"❌ Groq API Fehler: {e}", flush=True)
-        return f"⚠️ Fehler bei der KI-Verarbeitung: {str(e)}"
+        print(f"❌ Groq API/JSON Fehler: {e}", flush=True)
+        return {
+            "antwort_text": f"⚠️ Fehler bei der KI-Verarbeitung: {str(e)}",
+            "buttons": []
+        }
 
 
 # =====================================================================
-# TELEGRAM SENDEN
+# TELEGRAM SENDEN (MIT INLINE-BUTTON UNTERSTÜTZUNG)
 # =====================================================================
-def send_telegram_message(chat_id, text, message_id=None):
+def send_telegram_message(chat_id, text, message_id=None, buttons=None):
     if not TELEGRAM_BOT_TOKEN:
         print("❌ Telegram-Fehler: TELEGRAM_BOT_TOKEN ist nicht gesetzt!", flush=True)
         return False
 
+    reply_markup = None
+    if buttons and isinstance(buttons, list):
+        keyboard = []
+        for btn in buttons:
+            btn_text = btn.get("text", "Weiter")
+            btn_callback = btn.get("callback", "default_action")
+            keyboard.append([
+                {"text": btn_text, "callback_data": btn_callback}
+            ])
+        reply_markup = {"inline_keyboard": keyboard}
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
     if message_id:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-        payload = {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
+        payload["message_id"] = message_id
     else:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
     
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -528,22 +553,25 @@ def process_message_async(chat_id, query, message_id, is_shopping):
     try:
         save_message(chat_id, "user", query)
 
-        # Quelle für das Admin-Debug definieren
         source_info = ""
+        buttons = []
 
         if is_shopping:
             if in_db_vorhanden(query):
                 source_info = "SQLite-Cache (24h Fenster)"
-                send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** for: *{query}*", message_id=message_id)
+                send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** für: *{query}*", message_id=message_id)
                 db_produkte = hole_aus_db(query)
                 
-                final_lines = ["🛍️ **Dein Produkt-Vergleich (aus Cache):**\n"]
+                final_lines = [f"🛍️ **Produktvergleich für '{query}' (aus Cache):**\n"]
                 for p in db_produkte:
                     name, preis, url, shop = p
                     final_lines.append(f"• [{shop}] {name[:45]}...\n  💰 *{preis}* | 🔗 [Zum Shop]({url})")
                 
                 nachricht = "\n".join(final_lines)
-            
+                buttons = [
+                    {"text": "🔄 Live neu suchen", "callback": f"search_{query}"},
+                    {"text": "📉 Günstigere Alternativen", "callback": "cheaper_alt"}
+                ]
             else:
                 source_info = "Apify (Live-Scraper: Amazon & eBay)"
                 send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
@@ -560,7 +588,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
                 if ebay_data:
                     speichere_produkte(query, ebay_data, "eBay")
 
-                final_lines = ["🛍️ **Dein Produkt-Vergleich:**\n"]
+                final_lines = [f"🛍️ **Produktvergleich für '{query}':**\n"]
                 amazon_lines = process_platform_results(amazon_data, "Amazon")
                 ebay_lines = process_platform_results(ebay_data, "eBay")
                 
@@ -571,6 +599,10 @@ def process_message_async(chat_id, query, message_id, is_shopping):
                     nachricht = "⚠️ Aktuell konnten weder auf Amazon noch auf eBay Angebote gefunden werden."
                 else:
                     nachricht = "\n".join(final_lines)
+                    buttons = [
+                        {"text": "⭐ Nur Top-Bewertungen", "callback": "filter_top"},
+                        {"text": "🔄 Andere Kategorie", "callback": "new_search"}
+                    ]
         else:
             send_telegram_message(chat_id, f"🧠 Denk nach...", message_id=message_id)
             if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
@@ -578,7 +610,9 @@ def process_message_async(chat_id, query, message_id, is_shopping):
                 nachricht = execute_final_github_update(chat_id)
             else:
                 source_info = "Groq KI (Modell: openai/gpt-oss-20b mit SQLite-Chatgedächtnis)"
-                nachricht = ask_groq(chat_id, query)
+                groq_result = ask_groq(chat_id, query)
+                nachricht = groq_result["antwort_text"]
+                buttons = groq_result["buttons"]
 
         # Speichere saubere Nachricht ins Bot-Gedächtnis
         save_message(chat_id, "assistant", nachricht)
@@ -588,7 +622,7 @@ def process_message_async(chat_id, query, message_id, is_shopping):
         if str(chat_id) == ADMIN_USER_ID:
             final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Wer spricht: Bot (Admin-Modus)\n• Herkunft/Quelle: {source_info}"
 
-        send_telegram_message(chat_id, final_message_to_send, message_id=message_id)
+        send_telegram_message(chat_id, final_message_to_send, message_id=message_id, buttons=buttons)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
@@ -605,40 +639,58 @@ def webhook():
         
     try:
         data = request.get_json()
-        if not data or "message" not in data:
+        if not data:
             return "OK", 200
 
-        msg = data["message"]
-        chat_id = str(msg["chat"]["id"])
-        raw_text = msg.get("text", msg.get("caption", ""))
-        
-        if raw_text:
-            clean_query = raw_text.strip()
+        # 1. Behandle Button-Klicks (Callback Queries von Telegram Inline Buttons)
+        if "callback_query" in data:
+            cq = data["callback_query"]
+            cq_id = cq["id"]
+            chat_id = str(cq["message"]["chat"]["id"])
+            callback_data = cq["data"]
             
-            if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
-                command_part = clean_query[len(REQUIRED_PREFIX):].strip()
-                if command_part == "ja":
-                    executor.submit(process_message_async, chat_id, "ja", None, False)
-                return "OK", 200
+            # Bestätige den Button-Klick bei Telegram, damit das Ladesymbol verschwindet
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
+            
+            print(f"🔘 Button geklickt: {callback_data} von Chat {chat_id}", flush=True)
+            
+            # Sende eine Folgeantwort oder verarbeite den Button-Befehl
+            executor.submit(process_message_async, chat_id, f"Nutzer hat Button geklickt: {callback_data}", None, False)
+            return "OK", 200
 
-            is_shopping = False
-            lower_text = clean_query.lower()
-            search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen "]
-            for prefix in search_prefixes:
-                if lower_text.startswith(prefix):
-                    clean_query = clean_query[len(prefix):].strip()
-                    is_shopping = True
-                    break
-
-            if TELEGRAM_BOT_TOKEN:
-                res = requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": "⏳ Nachricht empfangen...", "parse_mode": "Markdown"}
-                ).json()
+        # 2. Behandle normale Textnachrichten
+        if "message" in data:
+            msg = data["message"]
+            chat_id = str(msg["chat"]["id"])
+            raw_text = msg.get("text", msg.get("caption", ""))
+            
+            if raw_text:
+                clean_query = raw_text.strip()
                 
-                lid = res.get("result", {}).get("message_id")
-                if lid:
-                    executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping)
+                if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
+                    command_part = clean_query[len(REQUIRED_PREFIX):].strip()
+                    if command_part == "ja":
+                        executor.submit(process_message_async, chat_id, "ja", None, False)
+                    return "OK", 200
+
+                is_shopping = False
+                lower_text = clean_query.lower()
+                search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen "]
+                for prefix in search_prefixes:
+                    if lower_text.startswith(prefix):
+                        clean_query = clean_query[len(prefix):].strip()
+                        is_shopping = True
+                        break
+
+                if TELEGRAM_BOT_TOKEN:
+                    res = requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat_id, "text": "⏳ Nachricht empfangen...", "parse_mode": "Markdown"}
+                    ).json()
+                    
+                    lid = res.get("result", {}).get("message_id")
+                    if lid:
+                        executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping)
                 
     except Exception as e:
         print(f"Webhook error: {e}", flush=True)
