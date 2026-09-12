@@ -776,7 +776,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             elif query.startswith("live_search_pro_") or query == "live_search_pro":
                 last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
                 
-                max_items = 
+                max_items = 50
                 einkaufspreis = (max_items / 1000) * 5.00
                 verkaufspreis = einkaufspreis * 2.0
                 verkaufspreis = max(0.05, round(verkaufspreis * 20) / 20)
