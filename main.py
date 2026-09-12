@@ -136,7 +136,6 @@ init_db()
 # MULTIMODAL & VISION PIPELINE (BILDER, VIDEOS, OCR, FAKE-ERKENNUNG)
 # =====================================================================
 def download_telegram_file(file_id: str) -> str:
-    """Lädt eine Mediendatei (Bild/Video) temporär von Telegram herunter."""
     try:
         res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10)
         res.raise_for_status()
@@ -209,7 +208,7 @@ def process_video_and_create_dossier(video_path: str) -> str:
 
 
 # =====================================================================
-# SCHRITT 1 & 2: DIE DATENSAMMLER (DuckDuckGo + SearXNG)
+# DATENSAMMLER (DuckDuckGo + SearXNG)
 # =====================================================================
 def fetch_raw_web_data(query, max_results=6):
     raw_results = []
@@ -251,7 +250,7 @@ def fetch_raw_web_data(query, max_results=6):
 
 
 # =====================================================================
-# SCHRITT 3: DER BOSS IN DER MITTE (Python-Filter & Fakten-Engine)
+# BOSS-FILTER & FAKTEN-ENGINE
 # =====================================================================
 TRUSTED_AUTHORITIES = {
     "apple.com", "microsoft.com", "reuters.com", "bloomberg.com", 
@@ -597,7 +596,7 @@ def process_platform_results(data, platform_name):
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION (ROBUSTER JSON-PARSER)
+# GROQ KI CHAT-FUNKTION (ROBUSTER JSON-PARSER & KONTEXT-BUTTONS)
 # =====================================================================
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not GROQ_API_KEY:
@@ -608,14 +607,14 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
             "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
             "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
+            "WICHTIG für Buttons: Erstelle 2 bis 4 kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen (z.B. bei Medien-Uploads passend zum analysierten Inhalt wie Text extrahieren, Preis prüfen etc.), damit sie auf dem Handydisplay nicht abgeschnitten werden! "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
             "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
             "  \"buttons\": [\n"
-            "    {\"text\": \"Button-Text\", \"callback\": \"befehl\"}\n"
+            "    {\"text\": \"Kurzer Text\", \"callback\": \"befehl\"}\n"
             "  ]\n"
             "}\n"
-            "Erstelle 2 bis 4 sinnvolle Aktions-Buttons."
         )
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -650,11 +649,11 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     except Exception as e:
         print(f"❌ Groq Parsing Error: {e}", flush=True)
         fallback = completion.choices[0].message.content if 'completion' in locals() else "⚠️ Verarbeitungsfehler."
-        return {"antwort_text": fallback, "buttons": [{"text": "🔄 Neu starten", "callback": "restart"}]}
+        return {"antwort_text": fallback, "buttons": [{"text": "🔄 Neustart", "callback": "restart"}]}
 
 
 # =====================================================================
-# TELEGRAM SENDEN (OPTIMIERTES 2x2 LAYOUT & FALLBACK-PROTECTION)
+# TELEGRAM SENDEN (2x2 LAYOUT & FALLBACK-PROTECTION)
 # =====================================================================
 def send_telegram_message(chat_id, text, message_id=None, buttons=None):
     if not TELEGRAM_BOT_TOKEN:
@@ -708,7 +707,7 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR (MULTIMODAL & WEBPELINE)
+# ASYNCHRONER PROZESSOR
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
@@ -721,7 +720,23 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
         lower_q = query.lower()
 
-        # Standort-Erkennung bei Eingaben wie "Mein Standort ist Berlin" oder "Ich bin in München"
+        # --- ZUSTANDS-MASCHINE (STATE MACHINE) FÜR LAUFENDE ABLÄUFE ---
+        current_state = get_user_fact(chat_id, "bot_state")
+        
+        if current_state == "waiting_for_appointment_title":
+            termin_titel = query.strip()
+            set_user_fact(chat_id, "bot_state", None)
+            
+            nachricht = f"✅ Termin-Titel gespeichert: **{termin_titel}**\n\nAls Nächstes: Wann soll der Termin stattfinden? (Bitte Datum & Uhrzeit nennen)"
+            buttons = [
+                {"text": "Morgen, 10:00", "callback": f"time_morgen_{termin_titel}"},
+                {"text": "❌ Abbrechen", "callback": "restart"}
+            ]
+            save_message(chat_id, "assistant", nachricht)
+            send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+            return
+
+        # Standort-Erkennung
         if "standort ist" in lower_q or "ich bin in" in lower_q:
             if "standort ist" in lower_q:
                 loc = query.split("standort ist")[-1].strip().capitalize()
@@ -730,36 +745,40 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             
             if loc:
                 set_user_fact(chat_id, "location", loc)
-                nachricht = f"✅ Danke! Dein Standort wurde fest auf **{loc}** gespeichert. Du kannst jetzt das Wetter oder lokale Infos abfragen."
-                buttons = [{"text": "🌤️ Wetter jetzt prüfen", "callback": "wetter"}]
+                nachricht = f"✅ Dein Standort wurde auf **{loc}** gespeichert."
+                buttons = [{"text": "🌤️ Wetter prüfen", "callback": "wetter"}]
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
                 return
 
         if is_callback:
             if query == "wetter" or "wetter" in lower_q:
                 location = get_user_fact(chat_id, "location")
                 if not location:
-                    nachricht = "📍 **Standort fehlt!**\n\nUm dir echte Wetterdaten und Fakten anzuzeigen, benötige ich deinen Standort.\n\nBitte antworte mir einfach im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
+                    nachricht = "📍 **Standort fehlt!**\n\nBitte antworte mir im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
                     buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
                 else:
-                    send_telegram_message(chat_id, f"🔍 Suche Live-Wetterdaten für deinen Standort: *{location}*...", message_id=message_id)
                     raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
                     clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
                     source_info = f"Wetter-Live-Suche für {location}"
-                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location} basierend auf den Web-Daten.", web_context=clean_context)
+                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
                     buttons = groq_result["buttons"]
+            elif "termin" in lower_q or "buchen" in lower_q or "tour" in lower_q:
+                set_user_fact(chat_id, "bot_state", "waiting_for_appointment_title")
+                nachricht = f"Um den Termin für **{query}** zu speichern, benötige ich noch ein paar Details. Bitte gib den Titel des Termins an (oder tippe ihn ein)."
+                buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+                return
             else:
                 source_info = "Button-Interaktion (Callback)"
-                groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button mit dem Befehl '{query}' geklickt. Reagiere darauf direkt und hilfsbereit.")
+                groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button '{query}' geklickt. Reagiere direkt darauf.")
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
 
         elif media_type and file_id:
-            send_telegram_message(chat_id, f"📥 Lade {media_type} herunter und analysiere...", message_id=message_id)
             local_path = download_telegram_file(file_id)
-            
             if not local_path:
                 nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
             else:
@@ -783,24 +802,19 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
         elif is_shopping:
             if in_db_vorhanden(query):
-                source_info = "SQLite-Cache (24h Fenster)"
-                send_telegram_message(chat_id, f"⚡ **Blitz-Ergebnis aus Datenbank** für: *{query}*", message_id=message_id)
+                source_info = "SQLite-Cache"
                 db_produkte = hole_aus_db(query)
-                
-                final_lines = [f"🛍️ **Produktvergleich für '{query}' (aus Cache):**\n"]
+                final_lines = [f"🛍️ **Produktvergleich für '{query}' (Cache):**\n"]
                 for p in db_produkte:
                     name, preis, url, shop = p
-                    final_lines.append(f"• [{shop}] {name[:45]}...\n  💰 *{preis}* | 🔗 [Zum Shop]({url})")
-                
+                    final_lines.append(f"• [{shop}] {name[:45]}...\n  💰 *{preis}* | 🔗 [Shop]({url})")
                 nachricht = "\n".join(final_lines)
                 buttons = [
-                    {"text": "🔄 Live neu suchen", "callback": f"search_{query}"},
-                    {"text": "📉 Günstigere Alternativen", "callback": "cheaper_alt"}
+                    {"text": "🔄 Neu suchen", "callback": f"search_{query}"},
+                    {"text": "📉 Günstiger", "callback": "cheaper_alt"}
                 ]
             else:
-                source_info = "Apify (Live-Scraper)"
-                send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
-                
+                source_info = "Apify Live-Scraper"
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
                     future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
                     future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
@@ -824,42 +838,43 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 final_lines = [line for line in final_lines if line.strip()]
                 
                 if len(final_lines) <= 1:
-                    nachricht = "⚠️ Aktuell konnten weder auf Amazon noch auf eBay Angebote gefunden werden."
+                    nachricht = "⚠️ Aktuell keine Angebote gefunden."
                 else:
                     nachricht = "\n".join(final_lines)
                     buttons = [
-                        {"text": "⭐ Nur Top-Bewertungen", "callback": "filter_top"},
-                        {"text": "🔄 Andere Kategorie", "callback": "new_search"}
+                        {"text": "⭐ Top-Bewertung", "callback": "filter_top"},
+                        {"text": "🔄 Andere Kat.", "callback": "new_search"}
                     ]
 
         else:
             clean_q = query.lower().strip()
-            
-            # Prüfen ob gezielt nach Wetter gefragt wird ohne Standort
             if "wetter" in clean_q:
                 location = get_user_fact(chat_id, "location")
                 if not location:
-                    nachricht = "📍 **Standort fehlt!**\n\nUm dir echte Wetterdaten und Fakten anzuzeigen, benötige ich deinen Standort.\n\nBitte antworte mir einfach im Chat mit:\n👉 *Mein Standort ist [Deine Stadt]* (z. B. *Mein Standort ist Gelsenkirchen*)."
+                    nachricht = "📍 **Standort fehlt!**\n\nBitte antworte mit:\n👉 *Mein Standort ist [Deine Stadt]*."
                     buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
                 else:
-                    send_telegram_message(chat_id, f"🔍 Suche Live-Wetterdaten für deinen Standort: *{location}*...", message_id=message_id)
                     raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
                     clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
                     source_info = f"Wetter-Live-Suche für {location}"
-                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location} basierend auf den Web-Daten.", web_context=clean_context)
+                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
                     buttons = groq_result["buttons"]
+            elif "termin" in clean_q or "buchen" in clean_q:
+                set_user_fact(chat_id, "bot_state", "waiting_for_appointment_title")
+                nachricht = "Um einen Termin zu speichern, benötige ich den Titel. Wie soll der Termin heißen?"
+                buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
+                save_message(chat_id, "assistant", nachricht)
+                send_telegram_message(chat_id, nachricht, message_id=None, buttons=buttons)
+                return
             else:
                 smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
-                
                 if clean_q in smalltalk_words or len(clean_q) < 4:
                     source_info = "Direkter Smalltalk"
                     groq_result = ask_groq(chat_id, query)
                     nachricht = groq_result["antwort_text"]
                     buttons = groq_result["buttons"]
                 else:
-                    send_telegram_message(chat_id, f"🧠 Analysiere Web-Daten...", message_id=message_id)
-                    
                     if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
                         source_info = "GitHub Self-Update Executor"
                         nachricht = execute_final_github_update(chat_id)
@@ -867,7 +882,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                         raw_web_data = fetch_raw_web_data(query)
                         clean_context = master_data_cleaner_and_boss(raw_web_data, query)
                         source_info = "Boss-Filter & Groq Analyse"
-                        
                         groq_result = ask_groq(chat_id, query, web_context=clean_context)
                         nachricht = groq_result["antwort_text"]
                         buttons = groq_result["buttons"]
@@ -878,11 +892,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         if str(chat_id) == ADMIN_USER_ID:
             final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Quelle: {source_info}"
 
-        send_telegram_message(chat_id, final_message_to_send, message_id=message_id, buttons=buttons)
+        target_message_id = None if is_callback else message_id
+        send_telegram_message(chat_id, final_message_to_send, message_id=target_message_id, buttons=buttons)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
-        send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
+        send_telegram_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=None)
 
 
 # =====================================================================
@@ -904,11 +919,10 @@ def webhook():
             cq = data["callback_query"]
             cq_id = cq["id"]
             chat_id = str(cq["message"]["chat"]["id"])
-            message_id = cq["message"]["message_id"]
             callback_data = cq["data"]
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            executor.submit(process_message_async, chat_id, callback_data, message_id, False, is_callback=True)
+            executor.submit(process_message_async, chat_id, callback_data, None, False, is_callback=True)
             return "OK", 200
 
         if "message" in data:
