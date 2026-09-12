@@ -52,7 +52,7 @@ pending_code_updates = {}
 # --- DATABASE INITIALIZATION & HELPERS ---
 def init_db():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
@@ -78,7 +78,7 @@ def init_db():
 
 def save_message(user_id, role, content):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute(
             'INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)',
@@ -91,7 +91,7 @@ def save_message(user_id, role, content):
 
 def get_chat_history(user_id, limit=10):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT role, content FROM messages
@@ -101,7 +101,8 @@ def get_chat_history(user_id, limit=10):
         ''', (str(user_id), limit))
         rows = cursor.fetchall()
         conn.close()
-        history = [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+        
+        history = [{"role": row[0], "content": row[1]} for row in reversed(rows)]
         return history
     except Exception as e:
         print(f"Error fetching history: {e}", flush=True)
@@ -117,11 +118,13 @@ def download_telegram_file(file_id: str) -> str:
     """Lädt eine Mediendatei (Bild/Video) temporär von Telegram herunter."""
     try:
         res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10)
+        res.raise_for_status()
         file_path_tg = res.json().get("result", {}).get("file_path")
         if not file_path_tg:
             return ""
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path_tg}"
         file_res = requests.get(file_url, timeout=30)
+        file_res.raise_for_status()
         
         suffix = os.path.splitext(file_path_tg)[1] or ".tmp"
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
@@ -133,7 +136,6 @@ def download_telegram_file(file_id: str) -> str:
         return ""
 
 def analyze_image_and_create_dossier(image_path: str) -> str:
-    """Simuliert/Führt Bildanalyse, OCR, Logo-/Markenerkennung, Verpackungsanalyse und Fake-Shop/Produkt-Erkennung aus."""
     dossier = (
         "BILD-DOSSIER VOM VISION-FILTER:\n"
         "• Bildanalyse: Erfolgreich durchgeführt.\n"
@@ -145,32 +147,37 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
     if OPENCV_AVAILABLE:
         try:
             img = cv2.imread(image_path)
-            h, w, _ = img.shape
-            dossier += f"• Bild-Metadaten: Auflösung {w}x{h} Pixel.\n"
+            if img is not None:
+                h, w, _ = img.shape
+                dossier += f"• Bild-Metadaten: Auflösung {w}x{h} Pixel.\n"
+            else:
+                dossier += "• Bild-Metadaten: Bild konnte von OpenCV nicht gelesen werden.\n"
         except Exception:
             pass
     return dossier
 
 def process_video_and_create_dossier(video_path: str) -> str:
-    """Extrahiert Frames aus Videos, führt OCR/Video-Analyse aus und aggregiert Video-Fakten."""
     dossier = "VIDEO-DOSSIER VOM VIDEO-PROZESSOR:\n"
     if OPENCV_AVAILABLE:
         try:
             cap = cv2.VideoCapture(video_path)
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25
-            duration = frame_count / fps if fps > 0 else 0
-            
-            dossier += f"• Video-Metadaten: Dauer ~{duration:.1f}s, {frame_count} Frames total.\n"
-            
-            count = 0
-            while cap.isOpened() and count < 5:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                count += 1
-            cap.release()
-            dossier += f"• Frame-Extraktion & Analyse: {count} Kern-Frames erfolgreich extrahiert und analysiert.\n"
+            if cap.isOpened():
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = cap.get(cv2.CAP_PROP_FPS) or 25
+                duration = frame_count / fps if fps > 0 else 0
+                
+                dossier += f"• Video-Metadaten: Dauer ~{duration:.1f}s, {frame_count} Frames total.\n"
+                
+                count = 0
+                while cap.isOpened() and count < 5:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    count += 1
+                cap.release()
+                dossier += f"• Frame-Extraktion & Analyse: {count} Kern-Frames erfolgreich extrahiert und analysiert.\n"
+            else:
+                dossier += "• Frame-Extraktion: Videodatei konnte nicht geöffnet werden.\n"
         except Exception as e:
             dossier += f"• Frame-Extraktion Fehler: {e}\n"
     else:
@@ -185,18 +192,20 @@ def process_video_and_create_dossier(video_path: str) -> str:
 # =====================================================================
 def fetch_raw_web_data(query, max_results=6):
     raw_results = []
+    seen_links = set()
     
     if DDGS:
         try:
             with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=max_results):
-                    raw_results.append({
-                        "title": r.get("title", ""),
-                        "snippet": r.get("body", ""),
-                        "link": r.get("href", "")
-                    })
-            if raw_results:
-                print(f"[DuckDuckGo] {len(raw_results)} Rohdaten geladen.", flush=True)
+                for r in ddgs.text(keywords=query, max_results=max_results):
+                    link = r.get("href", "")
+                    if link and link not in seen_links:
+                        seen_links.add(link)
+                        raw_results.append({
+                            "title": r.get("title", ""),
+                            "snippet": r.get("body", ""),
+                            "link": link
+                        })
         except Exception as e:
             print(f"[Warnung] DuckDuckGo fehlgeschlagen: {e}", flush=True)
 
@@ -205,15 +214,15 @@ def fetch_raw_web_data(query, max_results=6):
         response = requests.get(SEARXNG_URL, params=params, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            searx_count = 0
             for r in data.get("results", [])[:max_results]:
-                raw_results.append({
-                    "title": r.get("title", ""),
-                    "snippet": r.get("content", ""),
-                    "link": r.get("url", "")
-                })
-                searx_count += 1
-            print(f"[SearXNG] {searx_count} Rohdaten hinzugefügt.", flush=True)
+                link = r.get("url", "")
+                if link and link not in seen_links:
+                    seen_links.add(link)
+                    raw_results.append({
+                        "title": r.get("title", ""),
+                        "snippet": r.get("content", ""),
+                        "link": link
+                    })
     except Exception as e:
         print(f"[Warnung] SearXNG fehlgeschlagen: {e}", flush=True)
 
@@ -254,7 +263,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
         except Exception:
             domain = ""
 
-        if any(banned in domain for banned in BANNED_SOURCES):
+        if any(domain == banned or domain.endswith("." + banned) for banned in BANNED_SOURCES):
             continue
 
         if link in seen_links or title in seen_titles:
@@ -262,8 +271,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
         seen_links.add(link)
         seen_titles.add(title)
 
-        is_official = any(trusted in domain for trusted in TRUSTED_AUTHORITIES)
-
+        is_official = any(domain == trusted or domain.endswith("." + trusted) for trusted in TRUSTED_AUTHORITIES)
         combined_text = (title + " " + snippet).lower()
         is_rumor = any(keyword in combined_text for keyword in RUMOR_KEYWORDS)
         
@@ -278,23 +286,18 @@ def master_data_cleaner_and_boss(raw_results, user_query):
             priority = 2
 
         processed_items.append({
-            "title": title,
-            "domain": domain,
-            "snippet": snippet,
-            "link": link,
-            "status": status_tag,
-            "priority": priority
+            "title": title, "domain": domain, "snippet": snippet,
+            "link": link, "status": status_tag, "priority": priority
         })
 
     processed_items.sort(key=lambda x: x["priority"], reverse=True)
-
     if not processed_items:
         return ""
 
     boss_packet = (
         f"GEPRÜFTES DOSSIER VOM BOSS-FILTER:\n"
         f"Nutze AUSSCHLIESSLICH diese vorvalidierten Daten zur Beantwortung der Anfrage ('{user_query}'). "
-        f"Übernehme die Status-Markierungen ([OFFIZIELLER FAKT] / [UNBESTÄTIGTES GERÜCHT]) exakt in deine Antwort:\n\n"
+        f"Übernehme die Status-Markierungen exakt in deine Antwort:\n\n"
     )
 
     for idx, item in enumerate(processed_items[:5], 1):
@@ -304,7 +307,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
             f"Quelle: {item['domain']} ({item['link']})\n"
             f"Inhalt: {item['snippet']}\n\n"
         )
-
     return boss_packet
 
 
@@ -313,7 +315,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
 # =====================================================================
 def init_produkte_db():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS produkte (
@@ -328,13 +330,12 @@ def init_produkte_db():
         ''')
         conn.commit()
         conn.close()
-        print("✅ Produkte-Tabelle bereit!", flush=True)
     except Exception as e:
         print(f"❌ Fehler: {e}", flush=True)
 
 def in_db_vorhanden(kategorie):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT COUNT(*) FROM produkte
@@ -343,16 +344,14 @@ def in_db_vorhanden(kategorie):
         ''', (kategorie,))
         anzahl = cursor.fetchone()[0]
         conn.close()
-        if anzahl >= 3:
-            return True
-        return False
+        return anzahl >= 3
     except Exception as e:
         print(f"❌ Fehler: {e}", flush=True)
         return False
 
 def hole_aus_db(kategorie):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT name, preis, url, shop
@@ -370,49 +369,32 @@ def hole_aus_db(kategorie):
         return []
 
 def speichere_produkte(kategorie, data, shop):
+    if not data or not isinstance(data, list):
+        return
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
-        if data and isinstance(data, list):
-            for item in data[:5]:
-                name = item.get("title") or item.get("name") or "Produkt"
-                
-                raw_preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
-                if isinstance(raw_preis, dict):
-                    preis = (
-                        raw_preis.get("display") or 
-                        raw_preis.get("value") or 
-                        raw_preis.get("raw") or 
-                        "Auf Anfrage"
-                    )
-                    preis = str(preis)
-                else:
-                    preis = str(raw_preis)
-                    
-                url = item.get("url") or item.get("link") or "#"
-                cursor.execute('''
-                    INSERT INTO produkte
-                    (kategorie, name, preis, url, shop)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (kategorie, name, preis, url, shop))
+        for item in data[:5]:
+            name = item.get("title") or item.get("name") or "Produkt"
+            raw_preis = item.get("priceString") or item.get("price") or "Auf Anfrage"
+            if isinstance(raw_preis, dict):
+                preis = raw_preis.get("display") or raw_preis.get("value") or raw_preis.get("raw") or "Auf Anfrage"
+                preis = str(preis)
+            else:
+                preis = str(raw_preis)
+            url = item.get("url") or item.get("link") or "#"
+            cursor.execute('''
+                INSERT INTO produkte (kategorie, name, preis, url, shop)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (kategorie, name, preis, url, shop))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"❌ Fehler beim Speichern: {e}", flush=True)
 
-def clean_old_database_records():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM produkte WHERE datum < datetime('now', '-30 days')")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"❌ Fehler bei der DB-Bereinigung: {e}", flush=True)
-
 def daily_autopilot_job():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT kategorie FROM produkte")
         kategorien = [row[0] for row in cursor.fetchall()]
@@ -423,22 +405,25 @@ def daily_autopilot_job():
                 future_amazon = sub_executor.submit(run_apify_actor, kat, "junglee~amazon-crawler")
                 future_ebay = sub_executor.submit(run_apify_actor, kat, "automation-lab~ebay-scraper")
                 
-                amazon_data = future_amazon.result()
-                ebay_data = future_ebay.result()
+                try:
+                    amazon_data = future_amazon.result(timeout=120)
+                except Exception:
+                    amazon_data = None
+                
+                try:
+                    ebay_data = future_ebay.result(timeout=120)
+                except Exception:
+                    ebay_data = None
 
             if amazon_data:
                 speichere_produkte(kat, amazon_data, "Amazon")
             if ebay_data:
                 speichere_produkte(kat, ebay_data, "eBay")
-                
             time.sleep(3)
-
-        clean_old_database_records()
     except Exception as e:
         print(f"❌ Fehler im Autopilot-Job: {e}", flush=True)
 
 init_produkte_db()
-
 scheduler = BackgroundScheduler()
 scheduler.add_job(daily_autopilot_job, 'interval', days=1)
 scheduler.start()
@@ -451,72 +436,62 @@ def has_required_prefix(message: str) -> bool:
     return message.strip().startswith(REQUIRED_PREFIX)
 
 def validate_code_integrity(new_content: str) -> tuple[bool, str]:
-    required_keywords = [
-        "REQUIRED_PREFIX",
-        "update_github_code",
-        "execute_final_github_update",
-        "webhook",
-        "ADMIN_USER_ID"
-    ]
+    required_keywords = ["REQUIRED_PREFIX", "update_github_code", "execute_final_github_update", "webhook", "ADMIN_USER_ID"]
     missing_keywords = [kw for kw in required_keywords if kw not in new_content]
     if missing_keywords:
         return False, f"Fehlende Pflicht-Komponenten: {', '.join(missing_keywords)}"
     return True, "OK"
 
-def update_github_code(file_path: str, new_content: str, commit_message: str, chat_id: str) -> str:
-    is_valid, error_reason = validate_code_integrity(new_content)
+def update_github_code(chat_id: str, file_path: str, new_content: str, commit_message: str = "Update bot via Telegram") -> str:
+    is_valid, error_msg = validate_code_integrity(new_content)
     if not is_valid:
-        return f"❌ **INTEGRITÄTS-ABWEHR AKTIVIERT**\nGrund: `{error_reason}`. Update verweigert."
-
+        return f"❌ **Code-Integritätsprüfung fehlgeschlagen:**\n{error_msg}"
+    
     pending_code_updates[str(chat_id)] = {
         "file_path": file_path,
         "new_content": new_content,
         "commit_message": commit_message
     }
-    
-    preview_snippet = new_content[:500] + ("\n... [Code ist länger] ..." if len(new_content) > 500 else "")
-    return (
-        "🛡️ **SICHERHEITS-KONTROLLE AKTIV**\n\n"
-        f"📁 **Ziel-Datei:** `{file_path}`\n"
-        f"💬 **Commit-Nachricht:** `{commit_message}`\n\n"
-        f"**Code-Vorschau:**\n```python\n{preview_snippet}\n```\n\n"
-        f"👉 Antworte jetzt mit **`{REQUIRED_PREFIX} ja`**, um den Code endgültig zu übertragen."
-    )
+    return f"⚠️ **Sicherheitswarnung:** Du bist dabei, die Datei `{file_path}` via Telegram zu überschreiben.\n\nAntworte mit **`+×÷edi99 ja`**, um das Update endgültig auszuführen."
 
 def execute_final_github_update(chat_id: str) -> str:
-    update_data = pending_code_updates.get(str(chat_id))
+    update_data = pending_code_updates.pop(str(chat_id), None)
     if not update_data:
         return "❌ Es liegt keine ausstehende Code-Änderung für dich vor."
     
     file_path = update_data["file_path"]
     new_content = update_data["new_content"]
     commit_message = update_data["commit_message"]
-    del pending_code_updates[str(chat_id)]
 
     token = os.getenv("GITHUB_TOKEN")
     repo = os.getenv("GITHUB_REPO")
-    
     if not token or not repo:
-        return "❌ Fehler: `GITHUB_TOKEN` oder `GITHUB_REPO` sind nicht in den Umgebungsvariablen gesetzt."
+        return "❌ Fehler: `GITHUB_TOKEN` oder `GITHUB_REPO` nicht gesetzt."
         
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json"
-    }
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     api_url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
     
     try:
         get_res = requests.get(api_url, headers=headers, timeout=5)
-        sha = get_res.json().get("sha") if get_res.status_code == 200 else None
+        sha = None
+        if get_res.status_code == 200:
+            try:
+                sha = get_res.json().get("sha")
+            except Exception:
+                pass
             
-        encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
+        try:
+            encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
+        except Exception as enc_err:
+            return f"❌ Fehler bei der Code-Codierung (Umlaute/Sonderzeichen): {str(enc_err)}"
+
         payload = {"message": commit_message, "content": encoded_content, "branch": "main"}
         if sha:
             payload["sha"] = sha
             
         put_res = requests.put(api_url, headers=headers, json=payload, timeout=10)
         if put_res.status_code in [200, 201]:
-            return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde auf GitHub aktualisiert."
+            return f"✅ **Freigabe erfolgreich!** Die Datei `{file_path}` wurde aktualisiert."
         else:
             return f"❌ GitHub API Fehler ({put_res.status_code}): {put_res.text[:300]}"
     except Exception as e:
@@ -581,7 +556,6 @@ def process_platform_results(data, platform_name):
             for item in clean_items[:3]:
                 title = item.get("title") or item.get("name") or "Produkt"
                 title = title.replace("*", "").replace("_", "").replace("[", "").replace("]", "")
-                
                 raw_price = item.get("priceString") or item.get("price") or item.get("priceText") or "Auf Anfrage"
                 if isinstance(raw_price, dict):
                     price = raw_price.get("display") or raw_price.get("value") or raw_price.get("raw") or "Auf Anfrage"
@@ -606,18 +580,13 @@ def process_platform_results(data, platform_name):
 # =====================================================================
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not GROQ_API_KEY:
-        return {
-            "antwort_text": "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt.",
-            "buttons": []
-        }
+        return {"antwort_text": "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt.", "buttons": []}
     try:
         history = get_chat_history(chat_id, limit=10)
-        
         system_prompt = (
             "Du bist 'Code X', ein proaktiver, hilfsreicher persönlicher Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Samstag, der 12. September 2026. "
-            "Du antwortest präzise, klar und strukturiert. "
-            "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke (keine ```json ... ```) und ohne Text drumherum:\n"
+            "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
             "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
             "  \"buttons\": [\n"
@@ -629,7 +598,6 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
-        
         user_content = f"{web_context}\n\nNutzeranfrage: {query}" if web_context else f"Nutzeranfrage: {query}"
         messages.append({"role": "user", "content": user_content})
 
@@ -639,7 +607,6 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
             temperature=0.2,
             timeout=15
         )
-        
         raw_content = completion.choices[0].message.content.strip()
         
         clean_json = raw_content
@@ -661,14 +628,11 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     except Exception as e:
         print(f"❌ Groq Parsing Error: {e}", flush=True)
         fallback = completion.choices[0].message.content if 'completion' in locals() else "⚠️ Verarbeitungsfehler."
-        return {
-            "antwort_text": fallback,
-            "buttons": [{"text": "🔄 Neu starten", "callback": "restart"}]
-        }
+        return {"antwort_text": fallback, "buttons": [{"text": "🔄 Neu starten", "callback": "restart"}]}
 
 
 # =====================================================================
-# TELEGRAM SENDEN
+# TELEGRAM SENDEN (OPTIMIERTES 2x2 LAYOUT & FALLBACK-PROTECTION)
 # =====================================================================
 def send_telegram_message(chat_id, text, message_id=None, buttons=None):
     if not TELEGRAM_BOT_TOKEN:
@@ -677,10 +641,17 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
     reply_markup = None
     if buttons and isinstance(buttons, list):
         keyboard = []
+        current_row = []
         for btn in buttons:
             btn_text = btn.get("text", "Weiter")
             btn_callback = btn.get("callback", "default_action")
-            keyboard.append([{"text": btn_text, "callback_data": btn_callback}])
+            current_row.append({"text": btn_text, "callback_data": btn_callback})
+            
+            if len(current_row) == 2:
+                keyboard.append(current_row)
+                current_row = []
+        if current_row:
+            keyboard.append(current_row)
         reply_markup = {"inline_keyboard": keyboard}
 
     payload = {
@@ -704,6 +675,8 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
             clean_text = text.replace("**", "").replace("*", "").replace("[", "").replace("]", "")
             payload["text"] = clean_text
             payload.pop("parse_mode", None)
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
             response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         return True
@@ -713,7 +686,7 @@ def send_telegram_message(chat_id, text, message_id=None, buttons=None):
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR (MIT SMALLTALK & CALLBACK SICHERUNG)
+# ASYNCHRONER PROZESSOR (MULTIMODAL & WEBPELINE)
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
@@ -724,14 +697,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         buttons = []
         nachricht = ""
 
-        # A) Callback Query (Klick auf Button) sauber abfangen
         if is_callback:
             source_info = "Button-Interaktion (Callback)"
             groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button mit dem Befehl '{query}' geklickt. Reagiere darauf direkt und hilfsbereit.")
             nachricht = groq_result["antwort_text"]
             buttons = groq_result["buttons"]
 
-        # B) Medienverarbeitung (Bild / Video)
         elif media_type and file_id:
             send_telegram_message(chat_id, f"📥 Lade {media_type} herunter und analysiere...", message_id=message_id)
             local_path = download_telegram_file(file_id)
@@ -740,10 +711,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
             else:
                 if media_type == "image":
-                    source_info = "Vision-Pipeline (Bildanalyse, OCR, Fake-Erkennung)"
+                    source_info = "Vision-Pipeline"
                     media_dossier = analyze_image_and_create_dossier(local_path)
                 elif media_type == "video":
-                    source_info = "Video-Pipeline (Frame-Extraktion)"
+                    source_info = "Video-Pipeline"
                     media_dossier = process_video_and_create_dossier(local_path)
                 else:
                     media_dossier = "Unbekannter Medientyp."
@@ -757,7 +728,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
 
-        # C) Shopping-Modus
         elif is_shopping:
             if in_db_vorhanden(query):
                 source_info = "SQLite-Cache (24h Fenster)"
@@ -775,13 +745,20 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     {"text": "📉 Günstigere Alternativen", "callback": "cheaper_alt"}
                 ]
             else:
-                source_info = "Apify (Live-Scraper: Amazon & eBay)"
+                source_info = "Apify (Live-Scraper)"
                 send_telegram_message(chat_id, f"🔍 **Preisvergleich gestartet...**\nSuche parallel auf Amazon & eBay nach: *{query}*", message_id=message_id)
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as sub_executor:
                     future_amazon = sub_executor.submit(run_apify_actor, query, "junglee~amazon-crawler")
                     future_ebay = sub_executor.submit(run_apify_actor, query, "automation-lab~ebay-scraper")
-                    amazon_data, ebay_data = future_amazon.result(), future_ebay.result()
+                    try:
+                        amazon_data = future_amazon.result(timeout=120)
+                    except Exception:
+                        amazon_data = None
+                    try:
+                        ebay_data = future_ebay.result(timeout=120)
+                    except Exception:
+                        ebay_data = None
 
                 if amazon_data:
                     speichere_produkte(query, amazon_data, "Amazon")
@@ -791,6 +768,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 final_lines = [f"🛍️ **Produktvergleich für '{query}':**\n"]
                 final_lines.extend(process_platform_results(amazon_data, "Amazon"))
                 final_lines.extend(process_platform_results(ebay_data, "eBay"))
+                final_lines = [line for line in final_lines if line.strip()]
                 
                 if len(final_lines) <= 1:
                     nachricht = "⚠️ Aktuell konnten weder auf Amazon noch auf eBay Angebote gefunden werden."
@@ -801,13 +779,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                         {"text": "🔄 Andere Kategorie", "callback": "new_search"}
                     ]
 
-        # D) Normaler Text / Smalltalk vs Websuche
         else:
             clean_q = query.lower().strip()
             smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
             
             if clean_q in smalltalk_words or len(clean_q) < 4:
-                source_info = "Direkter Smalltalk (Keine Websuche nötig)"
+                source_info = "Direkter Smalltalk"
                 groq_result = ask_groq(chat_id, query)
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
@@ -854,18 +831,17 @@ def webhook():
         if not data:
             return "OK", 200
 
-        # Klick auf Inline-Buttons (Callback Query) sauber abfangen
         if "callback_query" in data:
             cq = data["callback_query"]
             cq_id = cq["id"]
             chat_id = str(cq["message"]["chat"]["id"])
+            message_id = cq["message"]["message_id"]
             callback_data = cq["data"]
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            executor.submit(process_message_async, chat_id, callback_data, None, False, is_callback=True)
+            executor.submit(process_message_async, chat_id, callback_data, message_id, False, is_callback=True)
             return "OK", 200
 
-        # Normale Text- oder Mediennachrichten
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
@@ -888,14 +864,28 @@ def webhook():
                     file_id = doc["file_id"]
 
             raw_text = msg.get("text", caption)
-            
             if raw_text or media_type:
                 clean_query = raw_text.strip() if raw_text else ""
                 
                 if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                     if command_part == "ja":
-                        executor.submit(process_message_async, chat_id, "ja", None, False, None, None)
+                        res = requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "⏳ Führe GitHub Update aus...", "parse_mode": "Markdown"}
+                        ).json()
+                        lid = res.get("result", {}).get("message_id")
+                        executor.submit(process_message_async, chat_id, "ja", lid, False, None, None)
+                    else:
+                        parts = command_part.split("\n", 1)
+                        file_path = parts[0].strip() if len(parts) > 0 else "main.py"
+                        new_content = parts[1] if len(parts) > 1 else command_part
+                        
+                        res_msg = update_github_code(chat_id, file_path, new_content)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": res_msg, "parse_mode": "Markdown"}
+                        )
                     return "OK", 200
 
                 is_shopping = False
