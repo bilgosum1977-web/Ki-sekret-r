@@ -1148,7 +1148,7 @@ def webhook():
     return "OK", 200
 
 @app.route("/ping", methods=["GET"])
-def ping":
+def ping():
     return "Bot is alive!", 200
 
 if __name__ == "__main__":
