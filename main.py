@@ -258,7 +258,7 @@ def process_video_and_create_dossier(video_path: str) -> str:
 
 
 # =====================================================================
-# DATENSAMMLER (DuckDuckGo + SearXNG)
+# DATENSAMMLER (DuckDuckGo + SearXNG) - KORRIGIERT
 # =====================================================================
 def fetch_raw_web_data(query, max_results=6):
     raw_results = []
@@ -267,7 +267,7 @@ def fetch_raw_web_data(query, max_results=6):
     if DDGS:
         try:
             with DDGS() as ddgs:
-                for r in ddgs.text(keywords=query, max_results=max_results):
+                for r in ddgs.text(query, max_results=max_results):
                     link = r.get("href", "")
                     if link and link not in seen_links:
                         seen_links.add(link)
@@ -279,22 +279,23 @@ def fetch_raw_web_data(query, max_results=6):
         except Exception as e:
             print(f"[Warnung] DuckDuckGo fehlgeschlagen: {e}", flush=True)
 
-    try:
-        params = {"q": query, "format": "json"}
-        response = requests.get(SEARXNG_URL, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            for r in data.get("results", [])[:max_results]:
-                link = r.get("url", "")
-                if link and link not in seen_links:
-                    seen_links.add(link)
-                    raw_results.append({
-                        "title": r.get("title", ""),
-                        "snippet": r.get("content", ""),
-                        "link": link
-                    })
-    except Exception as e:
-        print(f"[Warnung] SearXNG fehlgeschlagen: {e}", flush=True)
+    if SEARXNG_URL and "localhost" not in SEARXNG_URL:
+        try:
+            params = {"q": query, "format": "json"}
+            response = requests.get(SEARXNG_URL, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                for r in data.get("results", [])[:max_results]:
+                    link = r.get("url", "")
+                    if link and link not in seen_links:
+                        seen_links.add(link)
+                        raw_results.append({
+                            "title": r.get("title", ""),
+                            "snippet": r.get("content", ""),
+                            "link": link
+                        })
+        except Exception as e:
+            print(f"[Warnung] SearXNG fehlgeschlagen: {e}", flush=True)
 
     return raw_results
 
@@ -709,7 +710,6 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
             keyboard.append(current_row)
         reply_markup = {"inline_keyboard": keyboard}
     else:
-        # Explizit leeres Inline-Keyboard übergeben, um alte Buttons bei editMessageText zu löschen!
         reply_markup = {"inline_keyboard": []}
 
     if image_url and image_url.startswith("http") and not message_id:
@@ -1030,7 +1030,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         if str(chat_id) == ADMIN_USER_ID and source_info:
             final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Quelle: {source_info}"
 
-        # Jede Antwort nutzt jetzt konsequent die message_id zum Aktualisieren, damit alte Buttons direkt verschwinden
         send_telegram_photo_or_message(chat_id, final_message_to_send, image_url=image_to_send, message_id=message_id, buttons=buttons)
 
     except Exception as thread_error:
@@ -1058,7 +1057,7 @@ def webhook():
             cq_id = cq["id"]
             chat_id = str(cq["message"]["chat"]["id"])
             callback_data = cq["data"]
-            msg_id = cq["message"]["message_id"] # Echte message_id des Buttons erfassen
+            msg_id = cq["message"]["message_id"]
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
             executor.submit(process_message_async, chat_id, callback_data, msg_id, False, is_callback=True)
