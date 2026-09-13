@@ -1,4 +1,5 @@
-beautifulsoup4flask
+beautifulsoup4
+flask
 groq
 requests
 Pillow
