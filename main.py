@@ -4,7 +4,7 @@
 import os
 import time
 import json
-import re  # <-- Das hier ist der Chef-Filter für das JSON-Parsing
+import re  # <-- Chef-Filter für das JSON-Parsing
 import base64
 import sqlite3
 import requests
@@ -158,7 +158,7 @@ def fetch_raw_web_data(query):
 
 
 # =====================================================================
-# ENGINES KOPPLUNG: BOSS-FILTER + BEAUTIFUL SOUP DEEP-DIVE
+# ENGINES KOPPLUNG: BOSS-FILTER + PYTHON SMALLTALK PROTECTION
 # =====================================================================
 TRUSTED_AUTHORITIES = {
     "apple.com", "microsoft.com", "reuters.com", "bloomberg.com", 
@@ -171,11 +171,39 @@ BANNED_SOURCES = {
 
 RUMOR_KEYWORDS = ["gerücht", "soll", "angeblich", "womöglich", "insider behaupten", "wird gemunkelt"]
 
+def check_if_search_needed(query: str) -> bool:
+    """ CHEF-FILTER 1: Python blockiert Websuche bei Smalltalk komplett """
+    q = query.lower().strip()
+    smalltalk_words = ["hallo", "hi", "hey", "moin", "servus", "wie gehts", "wer bist du", "guten tag", "danke"]
+    if len(q) < 4 or any(word in q for word in smalltalk_words):
+        return False
+    return True
+
+def _fetch_volltext(link, headers, old_snippet):
+    """ Hilfsfunktion für paralleles Scraping ohne Zeitverlust """
+    try:
+        res = requests.get(link, headers=headers, timeout=2.5)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                script.decompose()
+            volltext = " ".join(soup.get_text().split())
+            if len(volltext) > len(old_snippet):
+                return volltext[:2500] + "... [Volltext via Beautiful Soup extrahiert]"
+    except Exception:
+        pass
+    return old_snippet
+
 def master_data_cleaner_and_boss(raw_results, user_query):
+    # CHEF-FILTER 2: Wenn Python sagt 'Keine Suche nötig', Dossier abbrechen
+    if not check_if_search_needed(user_query) or not raw_results:
+        return ""
+
     seen_links = set()
     seen_titles = set()
     processed_items = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    links_to_scrape = []
 
     for item in raw_results:
         title = item.get("title", "").strip()
@@ -207,17 +235,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
         if is_official:
             status_tag = "🔴 [OFFIZIELLER FAKT]"
             priority = 3
-            try:
-                res = requests.get(link, headers=headers, timeout=4)
-                if res.status_code == 200:
-                    soup = BeautifulSoup(res.text, 'html.parser')
-                    for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                        script.decompose()
-                    volltext = " ".join(soup.get_text().split())
-                    if len(volltext) > len(snippet):
-                        snippet = volltext[:2500] + "... [Volltext via Beautiful Soup extrahiert]"
-            except Exception:
-                pass
+            links_to_scrape.append((link, len(processed_items)))
         elif is_rumor:
             status_tag = "⚠️ [UNBESTÄTIGTES GERÜCHT]"
             priority = 1
@@ -230,6 +248,17 @@ def master_data_cleaner_and_boss(raw_results, user_query):
             "link": link, "status": status_tag, "priority": priority
         })
 
+    # PERFORMANCE-BOOST: Offizielle Seiten parallel abrufen
+    if links_to_scrape:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_index = {
+                executor.submit(_fetch_volltext, link, headers, processed_items[idx]["snippet"]): idx 
+                for link, idx in links_to_scrape
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                idx = future_to_index[future]
+                processed_items[idx]["snippet"] = future.result()
+
     processed_items.sort(key=lambda x: x["priority"], reverse=True)
     if not processed_items:
         return ""
@@ -237,7 +266,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
     boss_packet = (
         f"GEPRÜFTES DOSSIER VOM BOSS-FILTER:\n"
         f"Nutze AUSSCHLIESSLICH diese vorvalidierten Daten zur Beantwortung der Anfrage ('{user_query}'). "
-        f"Übernehme die Status-Markierungen exakt in deine Antwort:\n\n"
+        f"Übernehme die Status-Markierungen sowie die Quellen (Domains/Links) exakt in deine Antwort, damit der Nutzer weiß, woher die Info stammt:\n\n"
     )
 
     for idx, item in enumerate(processed_items[:5], 1):
@@ -501,7 +530,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_it
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION
+# GROQ KI CHAT-FUNKTION (Mit Python-Schutzschild & Quellen-Anzeige)
 # =====================================================================
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not groq_client:
@@ -509,11 +538,13 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     try:
         history = get_chat_history(chat_id, limit=10)
         system_prompt = (
-            "Du bist 'Code X', ein intelligenter, neutraler und hilfsbereiter KI-Assistent in einem Telegram-Bot. "
-            "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
+            "Du bist 'Code X', ein transparenter, neutraler und hilfsbereiter KI-Assistent in einem Telegram-Bot. "
+            "Wenn dir ein Dossier mit Web-Daten übergeben wird, musst du die Status-Markierungen (🔴, 🟡, ⚠️) "
+            "und die **Quellen (Domains/Links)** zwingend in deine Antwort einbauen, damit der Nutzer genau weiß, woher die Info stammt und wer spricht. "
+            "Erfinde keine Fakten. "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
-            "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
+            "  \"antwort_text\": \"Dein formatierter Text inklusive Quellen und Status\",\n"
             "  \"buttons\": []\n"
             "}\n"
         )
@@ -531,22 +562,36 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         )
         raw_content = completion.choices[0].message.content.strip()
         
+        # --- PYTHON WIRD ZUM CHEF: Robustes Regex-Parsing ---
         clean_json = raw_content
-        if "```" in clean_json:
-            parts = clean_json.split("```")
-            for p in parts:
-                p_s = p.strip()
-                if p_s.startswith("json"):
-                    p_s = p_s[4:].strip()
-                if p_s.startswith("{") and p_s.endswith("}"):
-                    clean_json = p_s
-                    break
+        match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+        else:
+            if "```" in clean_json:
+                parts = clean_json.split("```")
+                for p in parts:
+                    p_s = p.strip()
+                    if p_s.startswith("json"):
+                        p_s = p_s[4:].strip()
+                    if p_s.startswith("{") and p_s.endswith("}"):
+                        clean_json = p_s
+                        break
 
-        response_data = json.loads(clean_json)
-        return {
-            "antwort_text": response_data.get("antwort_text", raw_content),
-            "buttons": response_data.get("buttons", [])
-        }
+        # --- SICHERHEITS-NETZ: Python validiert das JSON ---
+        try:
+            response_data = json.loads(clean_json)
+            return {
+                "antwort_text": response_data.get("antwort_text", raw_content),
+                "buttons": response_data.get("buttons", [])
+            }
+        except json.JSONDecodeError:
+            print(f"⚠️ Python-Schutz: Groq lieferte ungültiges JSON. Rohdaten: {raw_content}", flush=True)
+            return {
+                "antwort_text": raw_content,
+                "buttons": []
+            }
+
     except Exception as e:
         print(f"❌ Groq Parsing Error: {e}", flush=True)
         return {"antwort_text": "⚠️ Verarbeitungsfehler bei der KI-Antwort.", "buttons": []}
