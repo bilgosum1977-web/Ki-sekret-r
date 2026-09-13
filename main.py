@@ -164,7 +164,7 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
             return "BILD-DOSSIER VOM VISION-FILTER: API-Key fehlt."
 
         completion = groq_client.chat.completions.create(
-            model="qwen/qwen3.6-27b",
+            model="qwen/qwen2.5-vl-7b-instruct",
             messages=[
                 {
                     "role": "user",
@@ -181,7 +181,7 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
             ],
             temperature=0.2,
             max_tokens=400
-        }
+        )
         ai_description = completion.choices[0].message.content
         
         dossier = (
