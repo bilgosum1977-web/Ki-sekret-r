@@ -4,6 +4,7 @@
 import os
 import time
 import json
+import re  # <-- Das hier ist der Chef-Filter für das JSON-Parsing
 import base64
 import sqlite3
 import requests
@@ -13,6 +14,7 @@ from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from groq import Groq
+
 
 # Optionale Imports für Medienverarbeitung (OpenCV, PIL)
 try:
