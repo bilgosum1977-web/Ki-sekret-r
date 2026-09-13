@@ -258,7 +258,7 @@ def process_video_and_create_dossier(video_path: str) -> str:
 
 
 # =====================================================================
-# DATENSAMMLER (DuckDuckGo + SearXNG) - KORRIGIERT
+# DATENSAMMLER (DuckDuckGo + SearXNG)
 # =====================================================================
 def fetch_raw_web_data(query, max_results=6):
     raw_results = []
@@ -585,7 +585,7 @@ def execute_final_github_update(chat_id: str) -> str:
 
 
 # =====================================================================
-# APIFY ACTOR STARTEN & POLLING (NUR BEI PREMIUM-TRIGGER)
+# APIFY ACTOR STARTEN & POLLING
 # =====================================================================
 def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_items: int = 10):
     if not APIFY_TOKEN:
@@ -634,8 +634,76 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_it
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION
+# GROQ KI CHAT-FUNKTION & BEGLEITER-STRATEGIE
 # =====================================================================
+def generate_smart_assistant_response(chat_id: str, user_query: str, results: str) -> dict:
+    """
+    DER CHEF (Python) analysiert den Verlauf und instruiert den BOTEN (Groq),
+    wie die Antwort verpackt werden soll – völlig unsichtbar für den Nutzer.
+    """
+    history = get_chat_history(chat_id, limit=10)
+    search_count = sum(1 for msg in history if "suche" in msg.get("content", "").lower())
+    
+    if search_count <= 1:
+        strategy_instruction = (
+            "Der Nutzer sucht zum ersten Mal. Präsentiere das Ergebnis direkt, "
+            "erkläre kurz, warum es passt, und frage charmant und unaufdringlich, "
+            "ob er dazu passende Alternativen oder direkt Zubehör sehen möchte."
+        )
+    else:
+        strategy_instruction = (
+            "Der Nutzer vergleicht oder sucht nach Alternativen. "
+            "Hebe die Unterschiede der Optionen hervor, bleibe extrem hilfsbereit "
+            "und biete proaktiv an, auf einer anderen Plattform oder in einer anderen Preiskategorie zu suchen."
+        )
+
+    system_prompt = (
+        "Du bist ein hilfshafter, persönlicher Einkaufs- und Suchbegleiter. "
+        "Erwähne niemals APIs, Datenbanken, Python oder Scraper. Antworte immer natürlich, "
+        "warm und auf den Punkt. "
+        "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
+        "{\n"
+        "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
+        "  \"buttons\": []\n"
+        "}\n"
+        f"Strategische Anweisung für diese Antwort: {strategy_instruction}"
+    )
+    
+    try:
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        user_content = f"Suchbegriff: {user_query}\nGefundene Daten: {results}"
+        messages.append({"role": "user", "content": user_content})
+
+        completion = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=messages,
+            temperature=0.2,
+            timeout=15
+        )
+        raw_content = completion.choices[0].message.content.strip()
+        
+        clean_json = raw_content
+        if "```" in clean_json:
+            parts = clean_json.split("```")
+            for p in parts:
+                p_s = p.strip()
+                if p_s.startswith("json"):
+                    p_s = p_s[4:].strip()
+                if p_s.startswith("{") and p_s.endswith("}"):
+                    clean_json = p_s
+                    break
+
+        response_data = json.loads(clean_json)
+        return {
+            "antwort_text": response_data.get("antwort_text", raw_content),
+            "buttons": response_data.get("buttons", [])
+        }
+    except Exception as e:
+        print(f"❌ Groq Parsing Error: {e}", flush=True)
+        return {"antwort_text": "⚠️ Entschuldigung, da ist bei der Begleiter-Formulierung etwas schiefgelaufen.", "buttons": []}
+
+
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not GROQ_API_KEY:
         return {"antwort_text": "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt.", "buttons": []}
@@ -776,15 +844,56 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
         current_state = get_user_fact(chat_id, "bot_state")
         
+        # ==========================================
+        # SCHRITT 1: User gibt die Stadt ein (Jetzt mit nahtloser Ergebnis-Ausführung)
+        # ==========================================
         if current_state == "waiting_for_location":
             loc = query.strip().capitalize()
-            set_user_fact(chat_id, "bot_state", None)
-            set_user_fact(chat_id, "location", loc)
+            set_user_fact(chat_id, "bot_state", None)  # Zustand sauber zurücksetzen
+            set_user_fact(chat_id, "location", loc)    # Standort permanent speichern
+
+            send_telegram_photo_or_message(chat_id, f"✅ Dein Standort wurde erfolgreich auf **{loc}** gespeichert!", message_id=message_id)
+
+            gemerkte_suche = get_user_fact(chat_id, "last_user_query")
             
-            nachricht = f"✅ Dein Standort wurde erfolgreich auf **{loc}** gespeichert!"
-            buttons = [{"text": "🏠 Hauptmenü / Weiter", "callback": "restart"}]
+            if gemerkte_suche:
+                send_telegram_photo_or_message(chat_id, f"🔍 Ich starte die Suche für **'{gemerkte_suche}'** in **{loc}**...")
+                such_string_mit_ort = f"{gemerkte_suche} {loc}"
+                
+                produkte = []
+                if in_db_vorhanden(gemerkte_suche):
+                    produkte = hole_aus_db(gemerkte_suche, limit=3, accessories_only=False)
+                else:
+                    try:
+                        raw_data = run_apify_actor(such_string_mit_ort, "junglee~amazon-crawler", 5)
+                        if raw_data:
+                            speichere_produkte(gemerkte_suche, raw_data, "Amazon")
+                        produkte = hole_aus_db(gemerkte_suche, limit=3, accessories_only=False)
+                    except Exception as e:
+                        print(f"Fehler beim Scraper: {e}", flush=True)
+
+                if produkte:
+                    smart_res = generate_smart_assistant_response(chat_id, gemerkte_suche, str(produkte[:2]))
+                    nachricht = smart_res["antwort_text"]
+                    buttons = [
+                        {"text": "🛒 Jetzt ansehen", "callback": f"order_now_{gemerkte_suche}"},
+                        {"text": "🔄 Alternativen zeigen", "callback": "show_alternatives"},
+                        {"text": "🔌 Zubehör anzeigen", "callback": f"accessories_{gemerkte_suche}"}
+                    ]
+                    top_prod = produkte[0]
+                    image_to_send = top_prod[4] if len(top_prod) > 4 else None
+                else:
+                    raw_web_data = fetch_raw_web_data(such_string_mit_ort)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort)
+                    groq_result = ask_groq(chat_id, f"Finde Angebote und Infos zu {such_string_mit_ort}", web_context=clean_context)
+                    nachricht = f"🌐 **Web-Ergebnisse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
+                    buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
+            else:
+                nachricht = "Dein Standort ist gespeichert. Wonach möchtest du suchen?"
+                buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
+
             save_message(chat_id, "assistant", nachricht)
-            send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+            send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, buttons=buttons)
             return
 
         if "standort ist" in lower_q or "ich bin in" in lower_q:
@@ -804,16 +913,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 product_name = get_user_fact(chat_id, "last_user_query") or "Produkt"
                 
                 set_user_fact(chat_id, "search_limit", str(limit_num))
-                
-                if in_db_vorhanden(product_name):
-                    source_info = f"SQLite-Cache (Top {limit_num})"
-                    produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
-                else:
-                    source_info = f"SQLite-Cache (Top {limit_num} - Keine Live-Abfrage ohne Premium)"
-                    produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
+                produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
 
                 if not produkte:
-                    nachricht = f"⚠️ Keine Angebote für '{product_name}' im Cache gefunden. Möchtest du die kostenpflichtige Live-Suche (Pro) starten?"
+                    nachricht = f"⚠️ Keine Angebote für '{product_name}' im Cache gefunden."
                     buttons = [{"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"}, {"text": "🏠 Hauptmenü", "callback": "restart"}]
                 else:
                     top_prod = produkte[0]
@@ -853,7 +956,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     buttons = [{"text": "🛒 Zurück zum Top-Treffer", "callback": f"limit_{len(produkte)}"}]
 
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
             elif query.startswith("accessories_"):
@@ -880,7 +983,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     ]
 
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_to_send, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
             elif query.startswith("order_now_"):
@@ -906,9 +1009,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = (
                     f"💎 **Premium Live-Suche (Pro)**\n\n"
                     f"• Live-Abfrage über Apify\n"
-                    f"• Tiefensuche nach den besten Web-Preisen\n"
-                    f"• Echtheits- und Händlerprüfung in Echtzeit\n\n"
-                    f"💰 **Kosten:** 0,29 € pro Live-Abfrage\n\n"
+                    f"• Tiefensuche nach den besten Web-Preisen\n\n"
                     f"Möchtest du die Live-Suche für **'{last_query}'** jetzt starten?"
                 )
                 buttons = [
@@ -921,7 +1022,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query.startswith("execute_live_pro_"):
                 target_query = query.replace("execute_live_pro_", "").strip()
-                send_telegram_photo_or_message(chat_id, f"🚀 Starte kostenpflichtige Live-Suche für '{target_query}'...", message_id=message_id)
+                send_telegram_photo_or_message(chat_id, f"🚀 Starte Live-Suche für '{target_query}'...", message_id=message_id)
                 raw_data = run_apify_actor(target_query, "junglee~amazon-crawler", 10)
                 if raw_data:
                     speichere_produkte(target_query, raw_data, "Amazon")
@@ -960,7 +1061,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
             else:
                 if media_type == "image":
-                    source_info = "Vision-Pipeline (Tiefen- & Echtheitsanalyse)"
+                    source_info = "Vision-Pipeline"
                     media_dossier = analyze_image_and_create_dossier(local_path)
                 elif media_type == "video":
                     source_info = "Video-Pipeline"
@@ -995,7 +1096,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
             
             if lower_q in smalltalk_words or len(lower_q) < 4:
-                source_info = "Direkter Smalltalk (Python Boss Mode)"
+                source_info = "Direkter Smalltalk"
                 groq_result = ask_groq(chat_id, query)
                 nachricht = groq_result["antwort_text"]
                 buttons = []
@@ -1019,7 +1120,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 else:
                     raw_web_data = fetch_raw_web_data(query)
                     clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                    source_info = "DuckDuckGo + SearXNG & Boss-Filter (Kostenlos)"
+                    source_info = "DuckDuckGo + SearXNG & Boss-Filter"
                     groq_result = ask_groq(chat_id, query, web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
                     buttons = []
@@ -1112,18 +1213,17 @@ def webhook():
                 # 1. Aktuellen Zustand prüfen
                 current_state = get_user_fact(chat_id, "bot_state")
                 
-                # Wenn der Bot auf eine Stadt wartet
                 if current_state == "waiting_for_location":
                     res = requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": "⏳ Standort wird verarbeitet...", "parse_mode": "Markdown"}
+                        json={"chat_id": chat_id, "text": "⏳ Standort wird verarbeitet und Suche gestartet...", "parse_mode": "Markdown"}
                     ).json()
                     lid = res.get("result", {}).get("message_id")
                     
                     executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None)
                     return "OK", 200
 
-                # 2. Text-Erkennung für die Suche (intelligenter und flexibler)
+                # 2. Text-Erkennung für die Suche
                 is_shopping = False
                 lower_text = clean_query.lower()
                 
@@ -1135,7 +1235,6 @@ def webhook():
                         is_shopping = True
                         break
                 
-                # Fallback: Wenn Zahlen + Zoll / Radkappen vorkommen, ist es eine Suche
                 if "zoll" in lower_text or "radkappen" in lower_text:
                     is_shopping = True
 
