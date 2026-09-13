@@ -1109,19 +1109,35 @@ def webhook():
                         )
                     return "OK", 200
 
+                # 1. Aktuellen Zustand prüfen
                 current_state = get_user_fact(chat_id, "bot_state")
+                
+                # Wenn der Bot auf eine Stadt wartet
                 if current_state == "waiting_for_location":
-                    executor.submit(process_message_async, chat_id, clean_query, None, False)
+                    res = requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat_id, "text": "⏳ Standort wird verarbeitet...", "parse_mode": "Markdown"}
+                    ).json()
+                    lid = res.get("result", {}).get("message_id")
+                    
+                    executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None)
                     return "OK", 200
 
+                # 2. Text-Erkennung für die Suche (intelligenter und flexibler)
                 is_shopping = False
                 lower_text = clean_query.lower()
-                search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen "]
+                
+                search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]
+                
                 for prefix in search_prefixes:
                     if lower_text.startswith(prefix):
                         clean_query = clean_query[len(prefix):].strip()
                         is_shopping = True
                         break
+                
+                # Fallback: Wenn Zahlen + Zoll / Radkappen vorkommen, ist es eine Suche
+                if "zoll" in lower_text or "radkappen" in lower_text:
+                    is_shopping = True
 
                 if TELEGRAM_BOT_TOKEN:
                     res = requests.post(
