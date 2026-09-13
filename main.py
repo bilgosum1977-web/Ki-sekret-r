@@ -641,16 +641,13 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     try:
         history = get_chat_history(chat_id, limit=10)
         system_prompt = (
-            "Du bist 'Code X', ein proaktiver, präziser Einkaufs-Sekretär in einem Telegram-Bot. "
+            "Du bist 'Code X', ein intelligenter, neutraler und hilfsbereiter KI-Assistent in einem Telegram-Bot. "
             "Das heutige Datum ist Sonntag, der 13. September 2026. "
             "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
-            "WICHTIG für Buttons: Erstelle kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen! "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
             "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
-            "  \"buttons\": [\n"
-            "    {\"text\": \"Kurzer Text\", \"callback\": \"befehl\"}\n"
-            "  ]\n"
+            "  \"buttons\": []\n"
             "}\n"
         )
         
@@ -686,7 +683,7 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     except Exception as e:
         print(f"❌ Groq Parsing Error: {e}", flush=True)
         fallback = completion.choices[0].message.content if 'completion' in locals() else "⚠️ Verarbeitungsfehler."
-        return {"antwort_text": fallback, "buttons": [{"text": "🔄 Neustart", "callback": "restart"}]}
+        return {"antwort_text": fallback, "buttons": []}
 
 
 # =====================================================================
@@ -697,7 +694,7 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
         return False
 
     reply_markup = None
-    if buttons and isinstance(buttons, list):
+    if buttons and isinstance(buttons, list) and len(buttons) > 0:
         keyboard = []
         current_row = []
         for btn in buttons:
@@ -711,6 +708,9 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
         if current_row:
             keyboard.append(current_row)
         reply_markup = {"inline_keyboard": keyboard}
+    else:
+        # Explizit leeres Inline-Keyboard übergeben, um alte Buttons bei editMessageText zu löschen!
+        reply_markup = {"inline_keyboard": []}
 
     if image_url and image_url.startswith("http") and not message_id:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -720,7 +720,7 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
             "caption": text,
             "parse_mode": "Markdown"
         }
-        if reply_markup:
+        if reply_markup and reply_markup["inline_keyboard"]:
             payload["reply_markup"] = reply_markup
         try:
             res = requests.post(url, json=payload, timeout=10)
@@ -761,7 +761,7 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR (MIT TEXT-WEICHE & KOSTENKONTROLLE)
+# ASYNCHRONER PROZESSOR (PYTHON ALS BOSS & ENTSCHEIDER)
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
@@ -880,7 +880,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     ]
 
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_to_send, buttons=buttons)
                 return
 
             elif query.startswith("order_now_"):
@@ -952,7 +952,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 source_info = "Button-Interaktion (Callback)"
                 groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button '{query}' geklickt.")
                 nachricht = groq_result["antwort_text"]
-                buttons = groq_result["buttons"]
+                buttons = []
 
         elif media_type and file_id:
             local_path = download_telegram_file(file_id)
@@ -973,29 +973,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 except Exception:
                     pass
 
-                # --- NEUE TEXT-WEICHE & SCHUTZ VOR UNGEWOLLTEM SHOPPING ---
-                commercial_keywords = ["verkaufen", "kaufen", "preis", "kosten", "shop", "suche", "euro", "€"]
-                is_commercial_intent = any(kw in lower_q for kw in commercial_keywords) if query else False
-
-                if is_commercial_intent:
-                    intent_instruction = (
-                        "Der Nutzer hat explizites Kauf- oder Verkaufsinteresse geäussert. "
-                        "Erstelle passende Produkt- oder Kauf-Buttons."
-                    )
-                else:
-                    intent_instruction = (
-                        "WICHTIG: Der Nutzer hat KEIN Kauf- oder Verkaufsinteresse geäussert (normales Foto, Landschaft oder Motiv). "
-                        "Erstelle KEINE Kauf-Buttons! Biete stattdessen sinnvolle Info-Buttons an (z.B. 'ℹ️ Mehr Infos', '🗺️ Ort anzeigen' oder '🔄 Neues Bild')."
-                    )
-
-                enhanced_query = (
-                    f"{query or 'Analysiere dieses Bild.'}\n\n"
-                    f"{intent_instruction}"
-                )
-                
-                groq_result = ask_groq(chat_id, enhanced_query, web_context=media_dossier)
+                groq_result = ask_groq(chat_id, query or "Analysiere dieses Bild.", web_context=media_dossier)
                 nachricht = groq_result["antwort_text"]
-                buttons = groq_result["buttons"]
+                buttons = []
 
         elif is_shopping:
             set_user_fact(chat_id, "last_user_query", query)
@@ -1012,7 +992,14 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             buttons = [{"text": "Top 3", "callback": "limit_3"}, {"text": "10 Ergebnisse", "callback": "limit_10"}]
 
         else:
-            if "wetter" in lower_q:
+            smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
+            
+            if lower_q in smalltalk_words or len(lower_q) < 4:
+                source_info = "Direkter Smalltalk (Python Boss Mode)"
+                groq_result = ask_groq(chat_id, query)
+                nachricht = groq_result["antwort_text"]
+                buttons = []
+            elif "wetter" in lower_q:
                 location = get_user_fact(chat_id, "location")
                 if not location:
                     nachricht = "📍 **Standort fehlt!** Bitte setze zuerst deinen Standort."
@@ -1023,26 +1010,19 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     source_info = f"Wetter-Live-Suche für {location}"
                     groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
                     nachricht = groq_result["antwort_text"]
-                    buttons = groq_result["buttons"]
+                    buttons = []
             else:
-                smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
-                if lower_q in smalltalk_words or len(lower_q) < 4:
-                    source_info = "Direkter Smalltalk"
-                    groq_result = ask_groq(chat_id, query)
-                    nachricht = groq_result["antwort_text"]
-                    buttons = groq_result["buttons"]
+                if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+                    source_info = "GitHub Self-Update Executor"
+                    nachricht = execute_final_github_update(chat_id)
+                    buttons = []
                 else:
-                    if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
-                        source_info = "GitHub Self-Update Executor"
-                        nachricht = execute_final_github_update(chat_id)
-                    else:
-                        # Kostenlose Web-Suche via DuckDuckGo & SearXNG + Boss-Filter
-                        raw_web_data = fetch_raw_web_data(query)
-                        clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                        source_info = "DuckDuckGo + SearXNG & Boss-Filter (Kostenlos)"
-                        groq_result = ask_groq(chat_id, query, web_context=clean_context)
-                        nachricht = groq_result["antwort_text"]
-                        buttons = groq_result["buttons"]
+                    raw_web_data = fetch_raw_web_data(query)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, query)
+                    source_info = "DuckDuckGo + SearXNG & Boss-Filter (Kostenlos)"
+                    groq_result = ask_groq(chat_id, query, web_context=clean_context)
+                    nachricht = groq_result["antwort_text"]
+                    buttons = []
 
         save_message(chat_id, "assistant", nachricht)
 
@@ -1050,12 +1030,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         if str(chat_id) == ADMIN_USER_ID and source_info:
             final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Quelle: {source_info}"
 
-        target_message_id = None if is_callback else message_id
-        send_telegram_photo_or_message(chat_id, final_message_to_send, image_url=image_to_send, message_id=target_message_id, buttons=buttons)
+        # Jede Antwort nutzt jetzt konsequent die message_id zum Aktualisieren, damit alte Buttons direkt verschwinden
+        send_telegram_photo_or_message(chat_id, final_message_to_send, image_url=image_to_send, message_id=message_id, buttons=buttons)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
-        send_telegram_photo_or_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=None)
+        send_telegram_photo_or_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
 
 
 # =====================================================================
@@ -1078,9 +1058,10 @@ def webhook():
             cq_id = cq["id"]
             chat_id = str(cq["message"]["chat"]["id"])
             callback_data = cq["data"]
+            msg_id = cq["message"]["message_id"] # Echte message_id des Buttons erfassen
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            executor.submit(process_message_async, chat_id, callback_data, None, False, is_callback=True)
+            executor.submit(process_message_async, chat_id, callback_data, msg_id, False, is_callback=True)
             return "OK", 200
 
         if "message" in data:
