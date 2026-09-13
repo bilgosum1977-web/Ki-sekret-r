@@ -133,7 +133,7 @@ init_db()
 
 
 # =====================================================================
-# MULTIMODAL & VISION PIPELINE (BILDER, VIDEOS, OCR, FAKE-ERKENNUNG)
+# MULTIMODAL & VISION PIPELINE (ECHTZEIT-KI ANALYSE MIT GROQ)
 # =====================================================================
 def download_telegram_file(file_id: str) -> str:
     try:
@@ -156,25 +156,51 @@ def download_telegram_file(file_id: str) -> str:
         return ""
 
 def analyze_image_and_create_dossier(image_path: str) -> str:
-    dossier = (
-        "BILD-DOSSIER VOM VISION-FILTER:\n"
-        "• Bildanalyse: Erfolgreich durchgeführt.\n"
-        "• OCR / Text im Bild: Textteile extrahiert.\n"
-        "• Markenerkennung & Logo: Analysiert.\n"
-        "• Verpackungs- & Modell-Erkennung: Geprüft.\n"
-        "• Sicherheits-Prüfung: Keine offensichtlichen Anomalien oder Fake-Muster im Screenshot erkannt.\n"
-    )
-    if OPENCV_AVAILABLE:
-        try:
-            img = cv2.imread(image_path)
-            if img is not None:
-                h, w, _ = img.shape
-                dossier += f"• Bild-Metadaten: Auflösung {w}x{h} Pixel.\n"
-            else:
-                dossier += "• Bild-Metadaten: Bild konnte von OpenCV nicht gelesen werden.\n"
-        except Exception:
-            pass
-    return dossier
+    try:
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        if not GROQ_API_KEY:
+            return "BILD-DOSSIER VOM VISION-FILTER: API-Key fehlt."
+
+        completion = groq_client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analysiere dieses Bild exakt und detailliert. Erkenne Gegenstände, Gebäude, Orte, Produkte, Schriften (OCR) oder Logos. Fasse deine Erkenntnisse präzise auf Deutsch zusammen."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.2,
+            max_tokens=400
+        }
+        ai_description = completion.choices[0].message.content
+        
+        dossier = (
+            f"BILD-DOSSIER VOM VISION-FILTER (KI-Echtzeitanalyse):\n"
+            f"• Inhalt / Erkennung: {ai_description}\n"
+        )
+        
+        if OPENCV_AVAILABLE:
+            try:
+                img = cv2.imread(image_path)
+                if img is not None:
+                    h, w, _ = img.shape
+                    dossier += f"• Bild-Metadaten: Auflösung {w}x{h} Pixel.\n"
+            except Exception:
+                pass
+        return dossier
+    except Exception as e:
+        print(f"❌ Fehler bei Groq Vision API: {e}", flush=True)
+        return "BILD-DOSSIER VOM VISION-FILTER: Fehler bei der KI-Bildanalyse."
 
 def process_video_and_create_dossier(video_path: str) -> str:
     dossier = "VIDEO-DOSSIER VOM VIDEO-PROZESSOR:\n"
@@ -405,7 +431,6 @@ def speichere_produkte(kategorie, data, shop):
         for item in data[:15]:
             name = item.get("title") or item.get("name") or "Produkt"
             
-            # Harter Zubehör-Filter direkt beim Speichern
             lower_name = name.lower()
             is_acc = 1 if any(kw in lower_name for kw in ACCESSOIRE_KEYWORDS) else 0
 
@@ -664,7 +689,6 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
             keyboard.append(current_row)
         reply_markup = {"inline_keyboard": keyboard}
 
-    # Wenn Bild vorhanden und valide, sendPhoto nutzen (Visueller Standard)
     if image_url and image_url.startswith("http") and not message_id:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         payload = {
@@ -680,9 +704,8 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
             if res.status_code == 200:
                 return True
         except Exception:
-            pass # Fallback auf normalen Text bei Bildfehlern
+            pass
 
-    # Standard Text-Nachricht (oder editMessage)
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -728,10 +751,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         image_to_send = None
         lower_q = query.lower()
 
-        # --- ZUSTANDS-MASCHINE (STATE MACHINE) ---
         current_state = get_user_fact(chat_id, "bot_state")
         
-        # Standort-Zustand abfangen (isolierte Ein-Wort-Antworten)
         if current_state == "waiting_for_location":
             loc = query.strip().capitalize()
             set_user_fact(chat_id, "bot_state", None)
@@ -743,7 +764,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
             return
 
-        # Text-Erkennung für Standort
         if "standort ist" in lower_q or "ich bin in" in lower_q:
             loc = query.split("standort ist")[-1].strip().capitalize() if "standort ist" in lower_q else query.split("ich bin in")[-1].strip().capitalize()
             if loc:
@@ -755,11 +775,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 return
 
         # =====================================================================
-        # 1. CALLBACK HANDLER (BUTTON-KLICKE & SHOPPING-FLuss)
+        # 1. CALLBACK HANDLER
         # =====================================================================
         if is_callback:
-            
-            # --- A) MENGEN-AUSWAHL (Top 3 vs 10 Ergebnisse) ---
             if query.startswith("limit_"):
                 parts = query.split("_")
                 limit_num = int(parts[1]) if len(parts) > 1 else 3
@@ -767,7 +785,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 
                 set_user_fact(chat_id, "search_limit", str(limit_num))
                 
-                # Prüfe DB-Cache zuerst
                 if in_db_vorhanden(product_name):
                     source_info = f"SQLite-Cache (Top {limit_num})"
                     produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
@@ -782,7 +799,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     nachricht = f"⚠️ Keine Angebote für '{product_name}' gefunden."
                     buttons = [{"text": "🔄 Neu suchen", "callback": "restart"}]
                 else:
-                    # Top-Treffer präsentieren
                     top_prod = produkte[0]
                     name, preis, url, shop, image_url, lieferzeit = top_prod
                     image_to_send = image_url
@@ -793,7 +809,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                         f"📱 **{name}**\n\n"
                         f"💰 **Preis:** {preis} | 📦 **Lieferung:** {lieferzeit} nach {location}\n"
                         f"🛒 **Anbieter:** {shop}\n\n"
-                        f"💡 **Match-Reason (Treffer-Grund):**\n"
+                        f"💡 **Match-Reason:**\n"
                         f"Exakte Übereinstimmung mit deiner Priorität (Bestpreis & Top-Verfügbarkeit im gewählten Suchumfang von {limit_num} Treffern).\n\n"
                         f"Wähle eine Option:"
                     )
@@ -807,7 +823,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
-            # --- B) ALTERNATIVEN ANZEIGEN (On-Demand aus DB) ---
             elif query == "show_alternatives":
                 product_name = get_user_fact(chat_id, "last_user_query") or "Produkt"
                 produkte = hole_aus_db(product_name, limit=5, accessories_only=False)
@@ -827,12 +842,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            # --- C) ZUBEHÖR-LOGIK ---
             elif query.startswith("accessories_"):
                 product_name = query.replace("accessories_", "").strip()
                 zubehör_query = f"{product_name} Zubehör Hülle Schutzfolie"
                 
-                # Zubehör aus DB oder Live holen
                 z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
                 if not z_produkte:
                     raw_z = run_apify_actor(zubehör_query, "junglee~amazon-crawler", max_items=5)
@@ -864,7 +877,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
-            # --- D) BESTELLUNG EINLEITEN (Direkter Shop-Link) ---
             elif query.startswith("order_now_"):
                 shop_url = query.replace("order_now_", "").strip()
                 nachricht = (
@@ -886,7 +898,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            # --- E) LIVE-SUCHE PRO (Mit Kostenangabe) ---
             elif query == "live_search_pro":
                 last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
                 verkaufspreis = 0.05
@@ -913,7 +924,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 if raw_data:
                     speichere_produkte(target_query, raw_data, "Amazon")
                 
-                # Weiterleitung zur Mengenauswahl
                 set_user_fact(chat_id, "last_user_query", target_query)
                 nachricht = f"✅ Live-Daten für **'{target_query}'** aktualisiert! Wie viele Ergebnisse möchtest du anzeigen?"
                 buttons = [
@@ -926,7 +936,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query == "restart":
                 set_user_fact(chat_id, "bot_state", None)
-                nachricht = "🤖 **Hauptmenü:** Hallo! What möchtest du suchen oder als Einkaufs-Sekretär erledigen lassen? (z. B. *Suche Samsung Galaxy S26*)"
+                nachricht = "🤖 **Hauptmenü:** Hallo! Was möchtest du suchen oder als Einkaufs-Sekretär erledigen lassen? (z. B. *Suche Samsung Galaxy S26*)"
                 buttons = [
                     {"text": "📍 Standort setzen", "callback": "ask_location"},
                     {"text": "🌤️ Wetter", "callback": "wetter"}
@@ -950,7 +960,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 buttons = groq_result["buttons"]
 
         # =====================================================================
-        # 2. MEDIA HANDLER (BILDER, VIDEOS, VISION)
+        # 2. MEDIA HANDLER (BILDER MIT ECHTER KI-VISION ANALYSE)
         # =====================================================================
         elif media_type and file_id:
             local_path = download_telegram_file(file_id)
@@ -958,7 +968,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
             else:
                 if media_type == "image":
-                    source_info = "Vision-Pipeline"
+                    source_info = "Vision-Pipeline (Echtzeit-KI)"
                     media_dossier = analyze_image_and_create_dossier(local_path)
                 elif media_type == "video":
                     source_info = "Video-Pipeline"
@@ -981,7 +991,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         elif is_shopping:
             set_user_fact(chat_id, "last_user_query", query)
             
-            # Prüfen ob Standort gesetzt ist, sonst freundlich nachfragen
             location = get_user_fact(chat_id, "location")
             if not location:
                 set_user_fact(chat_id, "bot_state", "waiting_for_location")
@@ -1118,7 +1127,6 @@ def webhook():
                         )
                     return "OK", 200
 
-                # Zustand prüfen (z.B. Standort-Eingabe)
                 current_state = get_user_fact(chat_id, "bot_state")
                 if current_state == "waiting_for_location":
                     executor.submit(process_message_async, chat_id, clean_query, None, False)
