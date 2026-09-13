@@ -912,9 +912,16 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query == "live_search_pro":
                 last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
-                nachricht = f"💎 **Premium Live-Suche (Pro):** Möchtest du die Live-Suche für '{last_query}' starten?"
+                nachricht = (
+                    f"💎 **Premium Live-Suche (Pro)**\n\n"
+                    f"• Live-Abfrage über Apify\n"
+                    f"• Tiefensuche nach den besten Web-Preisen\n"
+                    f"• Echtheits- und Händlerprüfung in Echtzeit\n\n"
+                    f"💰 **Kosten:** 0,29 € pro Live-Abfrage\n\n"
+                    f"Möchtest du die Live-Suche für **'{last_query}'** jetzt starten?"
+                )
                 buttons = [
-                    {"text": "✅ Live-Suche starten", "callback": f"execute_live_pro_{last_query}"},
+                    {"text": "🚀 Jetzt starten (Pro)", "callback": f"execute_live_pro_{last_query}"},
                     {"text": "❌ Abbrechen", "callback": "restart"}
                 ]
                 save_message(chat_id, "assistant", nachricht)
@@ -975,7 +982,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 except Exception:
                     pass
 
-                groq_result = ask_groq(chat_id, query or f"Analysiere dieses {media_type}.", web_context=media_dossier)
+                enhanced_query = (
+                    f"{query or 'Analysiere dieses Bild.'}\n\n"
+                    f"WICHTIG: Erstelle exakt zum erkannten Produkt passende, kurze Aktions-Buttons "
+                    f"(z.B. passende Ersatzteile, Bedienungsanleitung oder Direktkauf), keine generischen Standard-Buttons!"
+                )
+                groq_result = ask_groq(chat_id, enhanced_query, web_context=media_dossier)
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
 
