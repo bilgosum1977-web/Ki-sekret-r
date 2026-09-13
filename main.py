@@ -1,18 +1,18 @@
-#!/usr/init/env python3
-# -*- coding: utf-8 -*-
-
+# =====================================================================
+# IMPORTS & OPTIONALE BIBLIOTHEKEN
+# =====================================================================
 import os
-import sqlite3
+import time
 import json
 import base64
-import time
-import tempfile
-import concurrent.futures
-from flask import Flask, request
+import sqlite3
 import requests
-from groq import Groq
-from apscheduler.schedulers.background import BackgroundScheduler
+import concurrent.futures
 from urllib.parse import urlparse
+from flask import Flask, request
+from apscheduler.schedulers.background import BackgroundScheduler
+from bs4 import BeautifulSoup
+from groq import Groq
 
 # Optionale Imports für Medienverarbeitung (OpenCV, PIL)
 try:
@@ -31,277 +31,132 @@ except ImportError:
     except ImportError:
         DDGS = None
 
+
+# =====================================================================
+# CONFIGURATION & KEYS
+# =====================================================================
 app = Flask(__name__)
 
-# --- CONFIGURATION & KEYS ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_KEY")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
 
-REQUIRED_PREFIX = "+×÷edi99"
-
-if GROQ_API_KEY:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-
+REQUIRED_PREFIX = os.getenv("REQUIRED_PREFIX", "+×÷edi99")
 DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
 pending_code_updates = {}
 
+groq_client = None
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
 
-# --- DATABASE INITIALIZATION & HELPERS ---
-def init_db():
+
+# =====================================================================
+# DATENBANK & HILFSFUNKTIONEN (Chat History & User Facts)
+# =====================================================================
+def init_core_db():
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
+            CREATE TABLE IF NOT EXISTS chat_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
+                chat_id TEXT,
                 role TEXT,
                 content TEXT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_profile (
-                user_id TEXT,
-                fact_key TEXT,
-                fact_value TEXT,
-                PRIMARY KEY (user_id, fact_key)
+            CREATE TABLE IF NOT EXISTS user_facts (
+                chat_id TEXT,
+                key TEXT,
+                value TEXT,
+                PRIMARY KEY (chat_id, key)
             )
         ''')
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Database Initialization Error: {e}", flush=True)
+        print(f"❌ Fehler bei Core-DB Init: {e}", flush=True)
 
-def save_message(user_id, role, content):
+init_core_db()
+
+def save_message(chat_id, role, content):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)',
-            (str(user_id), role, content)
-        )
+        cursor.execute("INSERT INTO chat_history (chat_id, role, content) VALUES (?, ?, ?)", (str(chat_id), role, content))
         conn.commit()
         conn.close()
-    except Exception as e:
-        print(f"Error saving message: {e}", flush=True)
+    except Exception:
+        pass
 
-def get_chat_history(user_id, limit=10):
+def get_chat_history(chat_id, limit=10):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT role, content FROM messages
-            WHERE user_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-        ''', (str(user_id), limit))
+        cursor.execute("SELECT role, content FROM chat_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?", (str(chat_id), limit))
         rows = cursor.fetchall()
         conn.close()
-        
-        history = [{"role": row[0], "content": row[1]} for row in reversed(rows)]
-        return history
-    except Exception as e:
-        print(f"Error fetching history: {e}", flush=True)
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    except Exception:
         return []
 
-def get_user_fact(user_id, fact_key):
+def set_user_fact(chat_id, key, value):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         cursor = conn.cursor()
-        cursor.execute('SELECT fact_value FROM user_profile WHERE user_id = ? AND fact_key = ?', (str(user_id), fact_key))
+        cursor.execute("INSERT OR REPLACE INTO user_facts (chat_id, key, value) VALUES (?, ?, ?)", (str(chat_id), key, str(value)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_user_fact(chat_id, key):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM user_facts WHERE chat_id = ? AND key = ?", (str(chat_id), key))
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else None
     except Exception:
         return None
 
-def set_user_fact(user_id, fact_key, fact_value):
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=20)
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO user_profile (user_id, fact_key, fact_value) VALUES (?, ?, ?)', (str(user_id), fact_key, fact_value))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Error setting user fact: {e}", flush=True)
-
-init_db()
-
-
-# =====================================================================
-# MULTIMODAL & VISION PIPELINE (QWEN FALLBACK-KETTE & TIEFENANALYSE)
-# =====================================================================
-def download_telegram_file(file_id: str) -> str:
-    try:
-        res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10)
-        res.raise_for_status()
-        file_path_tg = res.json().get("result", {}).get("file_path")
-        if not file_path_tg:
-            return ""
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path_tg}"
-        file_res = requests.get(file_url, timeout=30)
-        file_res.raise_for_status()
-        
-        suffix = os.path.splitext(file_path_tg)[1] or ".tmp"
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        tmp_file.write(file_res.content)
-        tmp_file.close()
-        return tmp_file.name
-    except Exception as e:
-        print(f"❌ Fehler beim Download der Mediendatei: {e}", flush=True)
-        return ""
-
-def analyze_image_and_create_dossier(image_path: str) -> str:
-    try:
-        if not os.path.exists(image_path):
-            return "BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse): Bilddatei nicht gefunden."
-            
-        with open(image_path, "rb") as image_file:
-            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        if not GROQ_API_KEY:
-            return "BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse): API-Key fehlt."
-
-        vision_models = ["qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
-        completion = None
-        last_error = None
-
-        vision_prompt = (
-            "Analysiere dieses Bild hochpräzise und liefere ein strukturiertes Dossier mit folgenden Punkten auf Deutsch:\n"
-            "1. **Kerninhalt:** Was ist exakt auf dem Bild zu sehen (Gegenstände, Personen, Umgebung, Text/Logos)?\n"
-            "2. **Echtheits- & KI-Check:** Gibt es visuelle Artefakte, unnatürliche Übergänge, Textfehler oder typische Merkmale, die auf ein KI-generiertes Bild oder eine Bildmanipulation (Fake) hindeuten? Begründe kurz.\n"
-            "3. **Erweiterte Eigenschaften:** Besondere Details, Materialien, Stimmungen, Metadaten-Hinweise oder technische Auffälligkeiten."
-        )
-
-        for model_name in vision_models:
-            try:
-                print(f"Versuche erweiterte Bildanalyse mit Modell: {model_name}", flush=True)
-                completion = groq_client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": vision_prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_image}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    temperature=0.1,
-                    max_tokens=600
-                )
-                break
-            except Exception as model_err:
-                last_error = model_err
-                print(f"⚠️ Modell {model_name} fehlgeschlagen: {model_err}. Wechsle zum nächsten...", flush=True)
-                continue
-
-        if completion is None:
-            raise last_error
-
-        ai_description = completion.choices[0].message.content
-        
-        dossier = (
-            f"BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse):\n"
-            f"{ai_description}\n"
-        )
-        
-        if OPENCV_AVAILABLE:
-            try:
-                img = cv2.imread(image_path)
-                if img is not None:
-                    h, w, _ = img.shape
-                    dossier += f"• Technische Auflösung: {w}x{h} Pixel.\n"
-            except Exception:
-                pass
-        return dossier
-    except Exception as e:
-        print(f"❌ Fehler bei Groq Vision API: {e}", flush=True)
-        return "BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse): Fehler bei der KI-Bildanalyse."
-
-def process_video_and_create_dossier(video_path: str) -> str:
-    dossier = "VIDEO-DOSSIER VOM VIDEO-PROZESSOR:\n"
-    if OPENCV_AVAILABLE:
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                fps = cap.get(cv2.CAP_PROP_FPS) or 25
-                duration = frame_count / fps if fps > 0 else 0
-                
-                dossier += f"• Video-Metadaten: Dauer ~{duration:.1f}s, {frame_count} Frames total.\n"
-                
-                count = 0
-                while cap.isOpened() and count < 5:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    count += 1
-                cap.release()
-                dossier += f"• Frame-Extraktion & Analyse: {count} Kern-Frames erfolgreich extrahiert.\n"
-            else:
-                dossier += "• Frame-Extraktion: Videodatei konnte nicht geöffnet werden.\n"
-        except Exception as e:
-            dossier += f"• Frame-Extraktion Fehler: {e}\n"
-    else:
-        dossier += "• Frame-Extraktion: OpenCV nicht verfügbar.\n"
-    return dossier
-
-
-# =====================================================================
-# DATENSAMMLER (DuckDuckGo + SearXNG)
-# =====================================================================
-def fetch_raw_web_data(query, max_results=6):
-    raw_results = []
-    seen_links = set()
-    
-    if DDGS:
+def fetch_raw_web_data(query):
+    results = []
+    if DDGS is not None:
         try:
             with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=max_results):
-                    link = r.get("href", "")
-                    if link and link not in seen_links:
-                        seen_links.add(link)
-                        raw_results.append({
-                            "title": r.get("title", ""),
-                            "snippet": r.get("body", ""),
-                            "link": link
-                        })
+                for r in ddgs.text(query, max_results=5):
+                    results.append({
+                        "title": r.get("title", ""),
+                        "snippet": r.get("body", ""),
+                        "link": r.get("href", "")
+                    })
         except Exception as e:
-            print(f"[Warnung] DuckDuckGo fehlgeschlagen: {e}", flush=True)
-
-    if SEARXNG_URL and "localhost" not in SEARXNG_URL:
+            print(f"[Info] DDG Search fehlgeschlagen: {e}", flush=True)
+    
+    if not results and SEARXNG_URL:
         try:
-            params = {"q": query, "format": "json"}
-            response = requests.get(SEARXNG_URL, params=params, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                for r in data.get("results", [])[:max_results]:
-                    link = r.get("url", "")
-                    if link and link not in seen_links:
-                        seen_links.add(link)
-                        raw_results.append({
-                            "title": r.get("title", ""),
-                            "snippet": r.get("content", ""),
-                            "link": link
-                        })
+            res = requests.get(f"{SEARXNG_URL}/search", params={"q": query, "format": "json"}, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                for r in data.get("results", [])[:5]:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "snippet": r.get("content", ""),
+                        "link": r.get("url", "")
+                    })
         except Exception as e:
-            print(f"[Warnung] SearXNG fehlgeschlagen: {e}", flush=True)
-
-    return raw_results
+            print(f"[Info] SearXNG Search fehlgeschlagen: {e}", flush=True)
+    return results
 
 
 # =====================================================================
-# BOSS-FILTER & FAKTEN-ENGINE
+# ENGINES KOPPLUNG: BOSS-FILTER + BEAUTIFUL SOUP DEEP-DIVE
 # =====================================================================
 TRUSTED_AUTHORITIES = {
     "apple.com", "microsoft.com", "reuters.com", "bloomberg.com", 
@@ -318,6 +173,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
     seen_links = set()
     seen_titles = set()
     processed_items = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
     for item in raw_results:
         title = item.get("title", "").strip()
@@ -349,6 +205,17 @@ def master_data_cleaner_and_boss(raw_results, user_query):
         if is_official:
             status_tag = "🔴 [OFFIZIELLER FAKT]"
             priority = 3
+            try:
+                res = requests.get(link, headers=headers, timeout=4)
+                if res.status_code == 200:
+                    soup = BeautifulSoup(res.text, 'html.parser')
+                    for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                        script.decompose()
+                    volltext = " ".join(soup.get_text().split())
+                    if len(volltext) > len(snippet):
+                        snippet = volltext[:2500] + "... [Volltext via Beautiful Soup extrahiert]"
+            except Exception:
+                pass
         elif is_rumor:
             status_tag = "⚠️ [UNBESTÄTIGTES GERÜCHT]"
             priority = 1
@@ -515,7 +382,9 @@ scheduler.add_job(daily_autopilot_job, 'interval', days=1)
 scheduler.start()
 
 
-# --- CODE INTEGRITY & GITHUB UPDATES ---
+# =====================================================================
+# CODE INTEGRITY & GITHUB UPDATES
+# =====================================================================
 def has_required_prefix(message: str) -> bool:
     if not message:
         return False
@@ -566,11 +435,7 @@ def execute_final_github_update(chat_id: str) -> str:
             except Exception:
                 pass
             
-        try:
-            encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
-        except Exception as enc_err:
-            return f"❌ Fehler bei der Code-Codierung: {str(enc_err)}"
-
+        encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
         payload = {"message": commit_message, "content": encoded_content, "branch": "main"}
         if sha:
             payload["sha"] = sha
@@ -634,84 +499,15 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_it
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION & BEGLEITER-STRATEGIE
+# GROQ KI CHAT-FUNKTION
 # =====================================================================
-def generate_smart_assistant_response(chat_id: str, user_query: str, results: str) -> dict:
-    """
-    DER CHEF (Python) analysiert den Verlauf und instruiert den BOTEN (Groq),
-    wie die Antwort verpackt werden soll – völlig unsichtbar für den Nutzer.
-    """
-    history = get_chat_history(chat_id, limit=10)
-    search_count = sum(1 for msg in history if "suche" in msg.get("content", "").lower())
-    
-    if search_count <= 1:
-        strategy_instruction = (
-            "Der Nutzer sucht zum ersten Mal. Präsentiere das Ergebnis direkt, "
-            "erkläre kurz, warum es passt, und frage charmant und unaufdringlich, "
-            "ob er dazu passende Alternativen oder direkt Zubehör sehen möchte."
-        )
-    else:
-        strategy_instruction = (
-            "Der Nutzer vergleicht oder sucht nach Alternativen. "
-            "Hebe die Unterschiede der Optionen hervor, bleibe extrem hilfsbereit "
-            "und biete proaktiv an, auf einer anderen Plattform oder in einer anderen Preiskategorie zu suchen."
-        )
-
-    system_prompt = (
-        "Du bist ein hilfshafter, persönlicher Einkaufs- und Suchbegleiter. "
-        "Erwähne niemals APIs, Datenbanken, Python oder Scraper. Antworte immer natürlich, "
-        "warm und auf den Punkt. "
-        "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
-        "{\n"
-        "  \"antwort_text\": \"Dein formatierter Text für den Chat\",\n"
-        "  \"buttons\": []\n"
-        "}\n"
-        f"Strategische Anweisung für diese Antwort: {strategy_instruction}"
-    )
-    
-    try:
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history)
-        user_content = f"Suchbegriff: {user_query}\nGefundene Daten: {results}"
-        messages.append({"role": "user", "content": user_content})
-
-        completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=messages,
-            temperature=0.2,
-            timeout=15
-        )
-        raw_content = completion.choices[0].message.content.strip()
-        
-        clean_json = raw_content
-        if "```" in clean_json:
-            parts = clean_json.split("```")
-            for p in parts:
-                p_s = p.strip()
-                if p_s.startswith("json"):
-                    p_s = p_s[4:].strip()
-                if p_s.startswith("{") and p_s.endswith("}"):
-                    clean_json = p_s
-                    break
-
-        response_data = json.loads(clean_json)
-        return {
-            "antwort_text": response_data.get("antwort_text", raw_content),
-            "buttons": response_data.get("buttons", [])
-        }
-    except Exception as e:
-        print(f"❌ Groq Parsing Error: {e}", flush=True)
-        return {"antwort_text": "⚠️ Entschuldigung, da ist bei der Begleiter-Formulierung etwas schiefgelaufen.", "buttons": []}
-
-
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
-    if not GROQ_API_KEY:
+    if not groq_client:
         return {"antwort_text": "❌ Groq-Fehler: GROQ_API_KEY ist nicht gesetzt.", "buttons": []}
     try:
         history = get_chat_history(chat_id, limit=10)
         system_prompt = (
             "Du bist 'Code X', ein intelligenter, neutraler und hilfsbereiter KI-Assistent in einem Telegram-Bot. "
-            "Das heutige Datum ist Sonntag, der 13. September 2026. "
             "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
@@ -751,8 +547,7 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         }
     except Exception as e:
         print(f"❌ Groq Parsing Error: {e}", flush=True)
-        fallback = completion.choices[0].message.content if 'completion' in locals() else "⚠️ Verarbeitungsfehler."
-        return {"antwort_text": fallback, "buttons": []}
+        return {"antwort_text": "⚠️ Verarbeitungsfehler bei der KI-Antwort.", "buttons": []}
 
 
 # =====================================================================
@@ -770,7 +565,6 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
             btn_text = btn.get("text", "Weiter")
             btn_callback = btn.get("callback", "default_action")
             current_row.append({"text": btn_text, "callback_data": btn_callback})
-            
             if len(current_row) == 2:
                 keyboard.append(current_row)
                 current_row = []
@@ -782,12 +576,7 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
     if image_url and image_url.startswith("http") and not message_id:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        payload = {
-            "chat_id": chat_id,
-            "photo": image_url,
-            "caption": text,
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": chat_id, "photo": image_url, "caption": text, "parse_mode": "Markdown"}
         if reply_markup and reply_markup["inline_keyboard"]:
             payload["reply_markup"] = reply_markup
         try:
@@ -797,12 +586,7 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
         except Exception:
             pass
 
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
@@ -815,11 +599,8 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 400 and "can't parse entities" in response.text:
-            clean_text = text.replace("**", "").replace("*", "").replace("[", "").replace("]", "")
-            payload["text"] = clean_text
+            payload["text"] = text.replace("**", "").replace("*", "").replace("[", "").replace("]", "")
             payload.pop("parse_mode", None)
-            if reply_markup:
-                payload["reply_markup"] = reply_markup
             response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         return True
@@ -829,95 +610,77 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR (PYTHON ALS BOSS & ENTSCHEIDER)
+# ASYNCHRONER PROZESSOR
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
-    print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
     try:
         save_message(chat_id, "user", query if query else f"[{media_type}]")
-
-        source_info = ""
         buttons = []
         nachricht = ""
         image_to_send = None
-        lower_q = query.lower() if query else ""
 
         current_state = get_user_fact(chat_id, "bot_state")
         
-        # ==========================================
-        # SCHRITT 1: User gibt die Stadt ein (Jetzt mit nahtloser Ergebnis-Ausführung)
-        # ==========================================
         if current_state == "waiting_for_location":
             loc = query.strip().capitalize()
-            set_user_fact(chat_id, "bot_state", None)  # Zustand sauber zurücksetzen
-            set_user_fact(chat_id, "location", loc)    # Standort permanent speichern
+            set_user_fact(chat_id, "bot_state", None)  
+            set_user_fact(chat_id, "location", loc)    
 
-            send_telegram_photo_or_message(chat_id, f"✅ Dein Standort wurde erfolgreich auf **{loc}** gespeichert!", message_id=message_id)
+            send_telegram_photo_or_message(chat_id, f"✅ Dein Standort wurde auf **{loc}** gespeichert!", message_id=message_id)
 
-            gemerkte_suche = get_user_fact(chat_id, "last_user_query")
+            gemerkte_suche = get_user_fact(chat_id, "last_user_query") or "radkappen"
+            such_string_mit_ort = f"{gemerkte_suche} {loc}"
             
-            if gemerkte_suche:
-                send_telegram_photo_or_message(chat_id, f"🔍 Ich starte die Suche für **'{gemerkte_suche}'** in **{loc}**...")
-                such_string_mit_ort = f"{gemerkte_suche} {loc}"
-                
-                produkte = []
-                if in_db_vorhanden(gemerkte_suche):
-                    produkte = hole_aus_db(gemerkte_suche, limit=3, accessories_only=False)
-                else:
-                    try:
-                        raw_data = run_apify_actor(such_string_mit_ort, "junglee~amazon-crawler", 5)
-                        if raw_data:
-                            speichere_produkte(gemerkte_suche, raw_data, "Amazon")
-                        produkte = hole_aus_db(gemerkte_suche, limit=3, accessories_only=False)
-                    except Exception as e:
-                        print(f"Fehler beim Scraper: {e}", flush=True)
-
-                if produkte:
-                    smart_res = generate_smart_assistant_response(chat_id, gemerkte_suche, str(produkte[:2]))
-                    nachricht = smart_res["antwort_text"]
-                    buttons = [
-                        {"text": "🛒 Jetzt ansehen", "callback": f"order_now_{gemerkte_suche}"},
-                        {"text": "🔄 Alternativen zeigen", "callback": "show_alternatives"},
-                        {"text": "🔌 Zubehör anzeigen", "callback": f"accessories_{gemerkte_suche}"}
-                    ]
-                    top_prod = produkte[0]
-                    image_to_send = top_prod[4] if len(top_prod) > 4 else None
-                else:
-                    raw_web_data = fetch_raw_web_data(such_string_mit_ort)
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort)
-                    groq_result = ask_groq(chat_id, f"Finde Angebote und Infos zu {such_string_mit_ort}", web_context=clean_context)
-                    nachricht = f"🌐 **Web-Ergebnisse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
-                    buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
+            produkte = []
+            if in_db_vorhanden(gemerkte_suche):
+                produkte = hole_aus_db(gemerkte_suche, limit=3, accessories_only=False)
             else:
-                nachricht = "Dein Standort ist gespeichert. Wonach möchtest du suchen?"
+                try:
+                    raw_data = run_apify_actor(such_string_mit_ort, "junglee~amazon-crawler", 5)
+                    if raw_data:
+                        speichere_produkte(gemerkte_suche, raw_data, "Amazon")
+                    produkte = hole_aus_db(gemerkte_suche, limit=3, accessories_only=False)
+                except Exception:
+                    pass
+
+            if produkte:
+                top_prod = produkte[0]
+                name, preis, url, shop, image_url, lieferzeit = top_prod
+                image_to_send = image_url
+                nachricht = (
+                    f"🎯 **Top-Ergebnis für '{gemerkte_suche}' in {loc}:**\n\n"
+                    f"📦 **{name}**\n"
+                    f"💰 **Preis:** {preis} | 📦 **Lieferung:** {lieferzeit}\n"
+                    f"🛒 **Anbieter:** {shop}\n"
+                )
+                buttons = [
+                    {"text": "🛒 Zum Shop", "callback": f"open_link:{url}"},
+                    {"text": "🔄 Alternativen", "callback": "show_alternatives"},
+                    {"text": "🔌 Zubehör", "callback": f"accessories_{gemerkte_suche}"}
+                ]
+            else:
+                raw_web_data = fetch_raw_web_data(such_string_mit_ort)
+                clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort)
+                groq_result = ask_groq(chat_id, f"Finde Angebote zu {such_string_mit_ort}", web_context=clean_context)
+                nachricht = f"🌐 **Ergebnisse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
                 buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
 
             save_message(chat_id, "assistant", nachricht)
             send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, buttons=buttons)
             return
 
-        if "standort ist" in lower_q or "ich bin in" in lower_q:
-            loc = query.split("standort ist")[-1].strip().capitalize() if "standort ist" in lower_q else query.split("ich bin in")[-1].strip().capitalize()
-            if loc:
-                set_user_fact(chat_id, "location", loc)
-                nachricht = f"✅ Dein Standort wurde auf **{loc}** gespeichert."
-                buttons = [{"text": "🌤️ Wetter prüfen", "callback": "wetter"}]
-                save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
-                return
-
         if is_callback:
             if query.startswith("limit_"):
                 parts = query.split("_")
                 limit_num = int(parts[1]) if len(parts) > 1 else 3
-                product_name = get_user_fact(chat_id, "last_user_query") or "Produkt"
+                product_name = get_user_fact(chat_id, "last_user_query") or "radkappen"
                 
                 set_user_fact(chat_id, "search_limit", str(limit_num))
                 produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
 
                 if not produkte:
-                    nachricht = f"⚠️ Keine Angebote für '{product_name}' im Cache gefunden."
-                    buttons = [{"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"}, {"text": "🏠 Hauptmenü", "callback": "restart"}]
+                    nachricht = f"⚠️ Keine Angebote für '{product_name}' gefunden."
+                    buttons = [{"text": "💎 Live-Suche", "callback": "live_search_pro"}, {"text": "🏠 Hauptmenü", "callback": "restart"}]
                 else:
                     top_prod = produkte[0]
                     name, preis, url, shop, image_url, lieferzeit = top_prod
@@ -927,13 +690,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     nachricht = (
                         f"📱 **{name}**\n\n"
                         f"💰 **Preis:** {preis} | 📦 **Lieferung:** {lieferzeit} nach {location}\n"
-                        f"🛒 **Anbieter:** {shop}\n\n"
-                        f"Wähle eine Option:"
+                        f"🛒 **Anbieter:** {shop}\n"
                     )
                     buttons = [
-                        {"text": "🛒 Jetzt bestellen", "callback": f"order_now_{url}"},
-                        {"text": "🔄 Andere Optionen", "callback": "show_alternatives"},
-                        {"text": "🔌 Zubehör anzeigen", "callback": f"accessories_{product_name}"}
+                        {"text": "🛒 Zum Shop", "callback": f"open_link:{url}"},
+                        {"text": "🔄 Alternativen", "callback": "show_alternatives"},
+                        {"text": "🔌 Zubehör", "callback": f"accessories_{product_name}"}
                     ]
 
                 save_message(chat_id, "assistant", nachricht)
@@ -941,22 +703,22 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 return
 
             elif query == "show_alternatives":
-                product_name = get_user_fact(chat_id, "last_user_query") or "Produkt"
+                product_name = get_user_fact(chat_id, "last_user_query") or "radkappen"
                 produkte = hole_aus_db(product_name, limit=5, accessories_only=False)
                 
                 if len(produkte) < 2:
-                    nachricht = "ℹ️ Keine weiteren Alternativen im Cache vorhanden."
-                    buttons = [{"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"}]
+                    nachricht = "ℹ️ Keine weiteren Alternativen im Cache."
+                    buttons = [{"text": "💎 Live-Suche", "callback": "live_search_pro"}]
                 else:
-                    alt_lines = [f"🔄 **Weitere Alternativen für '{product_name}':**\n"]
+                    alt_lines = [f"🔄 **Alternativen für '{product_name}':**\n"]
                     for p in produkte[1:]:
-                        name, preis, url, shop, _, lieferzeit = p
-                        alt_lines.append(f"• [{shop}] {name[:40]}...\n  💰 *{preis}* | 📦 {lieferzeit} | 🔗 [Zum Shop]({url})")
+                        name, preis, url, shop, _, _ = p
+                        alt_lines.append(f"• [{shop}] {name[:40]}...\n  💰 *{preis}* | 🔗 [Zum Angebot]({url})")
                     nachricht = "\n".join(alt_lines)
-                    buttons = [{"text": "🛒 Zurück zum Top-Treffer", "callback": f"limit_{len(produkte)}"}]
+                    buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
 
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
             elif query.startswith("accessories_"):
@@ -964,79 +726,55 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
 
                 if not z_produkte:
-                    nachricht = f"⚠️ Aktuell kein passendes Zubehör im Cache für '{product_name}' gefunden."
+                    nachricht = f"⚠️ Kein passendes Zubehör für '{product_name}' gefunden."
                     buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
                 else:
                     top_z = z_produkte[0]
-                    z_name, z_preis, z_url, z_shop, z_image, z_lieferzeit = top_z
+                    z_name, z_preis, z_url, z_shop, z_image, _ = top_z
                     image_to_send = z_image
 
                     nachricht = (
-                        f"🔌 **Top-Zubehör für {product_name}:**\n\n"
+                        f"🔌 **Zubehör für {product_name}:**\n\n"
                         f"📦 **{z_name}**\n"
-                        f"💰 **Preis:** {z_preis} | 📦 **Lieferung:** {z_lieferzeit}\n"
-                        f"🛒 **Anbieter:** {z_shop}\n"
+                        f"💰 **Preis:** {z_preis} | 🛒 **Anbieter:** {z_shop}\n"
                     )
                     buttons = [
-                        {"text": "🛒 Zubehör bestellen", "callback": f"order_now_{z_url}"},
-                        {"text": "🔄 Andere Optionen", "callback": "show_alternatives"}
+                        {"text": "🛒 Zum Shop", "callback": f"open_link:{z_url}"},
+                        {"text": "🏠 Hauptmenü", "callback": "restart"}
                     ]
 
                 save_message(chat_id, "assistant", nachricht)
                 send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
-            elif query.startswith("order_now_"):
-                shop_url = query.replace("order_now_", "").strip()
-                nachricht = "🛒 **Bestell-Vorgang vorbereitet!** Klicke unten, um den Kauf direkt beim Händler abzuschließen:"
-                buttons = [
-                    {"text": "🔗 Zum Händler-Checkout", "callback": f"open_link:{shop_url}"},
-                    {"text": "🏠 Hauptmenü", "callback": "restart"}
-                ]
-                save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
-                return
-
             elif query.startswith("open_link:"):
                 target_url = query.replace("open_link:", "").strip()
-                nachricht = f"🔗 **Hier ist dein direkter Link zum Shop:**\n{target_url}"
+                nachricht = f"🔗 **Direkter Link zum Angebot:**\n{target_url}"
                 buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
             elif query == "live_search_pro":
-                last_query = get_user_fact(chat_id, "last_user_query") or "Produkt"
-                nachricht = (
-                    f"💎 **Premium Live-Suche (Pro)**\n\n"
-                    f"• Live-Abfrage über Apify\n"
-                    f"• Tiefensuche nach den besten Web-Preisen\n\n"
-                    f"Möchtest du die Live-Suche für **'{last_query}'** jetzt starten?"
-                )
-                buttons = [
-                    {"text": "🚀 Jetzt starten (Pro)", "callback": f"execute_live_pro_{last_query}"},
-                    {"text": "❌ Abbrechen", "callback": "restart"}
-                ]
-                save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
-                return
-
-            elif query.startswith("execute_live_pro_"):
-                target_query = query.replace("execute_live_pro_", "").strip()
-                send_telegram_photo_or_message(chat_id, f"🚀 Starte Live-Suche für '{target_query}'...", message_id=message_id)
-                raw_data = run_apify_actor(target_query, "junglee~amazon-crawler", 10)
+                last_query = get_user_fact(chat_id, "last_user_query") or "radkappen"
+                raw_data = run_apify_actor(last_query, "junglee~amazon-crawler", 5)
                 if raw_data:
-                    speichere_produkte(target_query, raw_data, "Amazon")
-                set_user_fact(chat_id, "last_user_query", target_query)
-                nachricht = f"✅ Live-Daten für **'{target_query}'** aktualisiert! Wie viele Ergebnisse?"
-                buttons = [{"text": "Top 3", "callback": "limit_3"}, {"text": "10 Ergebnisse", "callback": "limit_10"}]
-                save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                    speichere_produkte(last_query, raw_data, "Amazon")
+                
+                produkte = hole_aus_db(last_query, limit=3, accessories_only=False)
+                if produkte:
+                    top_prod = produkte[0]
+                    name, preis, url, shop, image_url, _ = top_prod
+                    nachricht = f"✅ **Live-Ergebnis:**\n📦 {name}\n💰 {preis}\n🛒 {shop}"
+                    buttons = [{"text": "🛒 Zum Shop", "callback": f"open_link:{url}"}, {"text": "🏠 Hauptmenü", "callback": "restart"}]
+                    send_telegram_photo_or_message(chat_id, nachricht, image_url=image_url, message_id=message_id, buttons=buttons)
+                else:
+                    send_telegram_photo_or_message(chat_id, "Keine Live-Treffer gefunden.", message_id=message_id, buttons=[{"text": "🏠 Hauptmenü", "callback": "restart"}])
                 return
 
             elif query == "restart":
                 set_user_fact(chat_id, "bot_state", None)
                 nachricht = "🤖 **Hauptmenü:** Hallo! Was möchtest du suchen?"
-                buttons = [{"text": "📍 Standort setzen", "callback": "ask_location"}, {"text": "🌤️ Wetter", "callback": "wetter"}]
+                buttons = [{"text": "📍 Standort setzen", "callback": "ask_location"}]
                 save_message(chat_id, "assistant", nachricht)
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
@@ -1049,89 +787,42 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            else:
-                source_info = "Button-Interaktion (Callback)"
-                groq_result = ask_groq(chat_id, f"Der Nutzer hat den Button '{query}' geklickt.")
-                nachricht = groq_result["antwort_text"]
-                buttons = []
-
-        elif media_type and file_id:
-            local_path = download_telegram_file(file_id)
-            if not local_path:
-                nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
-            else:
-                if media_type == "image":
-                    source_info = "Vision-Pipeline"
-                    media_dossier = analyze_image_and_create_dossier(local_path)
-                elif media_type == "video":
-                    source_info = "Video-Pipeline"
-                    media_dossier = process_video_and_create_dossier(local_path)
-                else:
-                    media_dossier = "Unbekannter Medientyp."
-
-                try:
-                    os.remove(local_path)
-                except Exception:
-                    pass
-
-                groq_result = ask_groq(chat_id, query or "Analysiere dieses Bild.", web_context=media_dossier)
-                nachricht = groq_result["antwort_text"]
-                buttons = []
-
         elif is_shopping:
-            set_user_fact(chat_id, "last_user_query", query)
+            clean_search = query.lower()
+            for prefix in ["finde mir", "suche nach", "suchen nach", "suche", "such", "finde", "mir"]:
+                if clean_search.startswith(prefix):
+                    clean_search = clean_search[len(prefix):].strip()
+            
+            set_user_fact(chat_id, "last_user_query", clean_search)
             location = get_user_fact(chat_id, "location")
+            
             if not location:
                 set_user_fact(chat_id, "bot_state", "waiting_for_location")
-                nachricht = f"🛍️ Du suchst nach **'{query}'**.\n\nBevor wir starten: In welcher Stadt befindest du dich?"
+                nachricht = f"🛍️ Du suchst nach **'{clean_search}'**.\n\nIn welcher Stadt befindest du dich?"
                 buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
                 return
 
-            nachricht = f"🎯 Suchanfrage für **'{query}'** empfangen.\n\nWie viele Ergebnisse möchtest du sehen?"
+            nachricht = f"🎯 Suchanfrage für **'{clean_search}'** empfangen.\n\nWie viele Ergebnisse möchtest du sehen?"
             buttons = [{"text": "Top 3", "callback": "limit_3"}, {"text": "10 Ergebnisse", "callback": "limit_10"}]
+            save_message(chat_id, "assistant", nachricht)
+            send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
+            return
 
         else:
-            smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
-            
-            if lower_q in smalltalk_words or len(lower_q) < 4:
-                source_info = "Direkter Smalltalk"
-                groq_result = ask_groq(chat_id, query)
+            if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+                nachricht = execute_final_github_update(chat_id)
+                buttons = []
+            else:
+                raw_web_data = fetch_raw_web_data(query)
+                clean_context = master_data_cleaner_and_boss(raw_web_data, query)
+                groq_result = ask_groq(chat_id, query, web_context=clean_context)
                 nachricht = groq_result["antwort_text"]
                 buttons = []
-            elif "wetter" in lower_q:
-                location = get_user_fact(chat_id, "location")
-                if not location:
-                    nachricht = "📍 **Standort fehlt!** Bitte setze zuerst deinen Standort."
-                    buttons = [{"text": "📍 Standort setzen", "callback": "ask_location"}]
-                else:
-                    raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 13. September 2026")
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
-                    source_info = f"Wetter-Live-Suche für {location}"
-                    groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
-                    nachricht = groq_result["antwort_text"]
-                    buttons = []
-            else:
-                if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
-                    source_info = "GitHub Self-Update Executor"
-                    nachricht = execute_final_github_update(chat_id)
-                    buttons = []
-                else:
-                    raw_web_data = fetch_raw_web_data(query)
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                    source_info = "DuckDuckGo + SearXNG & Boss-Filter"
-                    groq_result = ask_groq(chat_id, query, web_context=clean_context)
-                    nachricht = groq_result["antwort_text"]
-                    buttons = []
 
         save_message(chat_id, "assistant", nachricht)
-
-        final_message_to_send = nachricht
-        if str(chat_id) == ADMIN_USER_ID and source_info:
-            final_message_to_send += f"\n\n🔍 *[ADMIN DEBUG]*\n• Quelle: {source_info}"
-
-        send_telegram_photo_or_message(chat_id, final_message_to_send, image_url=image_to_send, message_id=message_id, buttons=buttons)
+        send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
@@ -1175,15 +866,6 @@ def webhook():
             elif "video" in msg:
                 media_type = "video"
                 file_id = msg["video"]["file_id"]
-            elif "document" in msg:
-                doc = msg["document"]
-                mime = doc.get("mime_type", "")
-                if "image" in mime:
-                    media_type = "image"
-                    file_id = doc["file_id"]
-                elif "video" in mime:
-                    media_type = "video"
-                    file_id = doc["file_id"]
 
             raw_text = msg.get("text", caption)
             if raw_text or media_type:
@@ -1210,26 +892,19 @@ def webhook():
                         )
                     return "OK", 200
 
-                # 1. Aktuellen Zustand prüfen
                 current_state = get_user_fact(chat_id, "bot_state")
-                
                 if current_state == "waiting_for_location":
                     res = requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": "⏳ Standort wird verarbeitet und Suche gestartet...", "parse_mode": "Markdown"}
+                        json={"chat_id": chat_id, "text": "⏳ Standort wird verarbeitet...", "parse_mode": "Markdown"}
                     ).json()
                     lid = res.get("result", {}).get("message_id")
-                    
                     executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None)
                     return "OK", 200
 
-                # 2. Text-Erkennung für die Suche
                 is_shopping = False
                 lower_text = clean_query.lower()
-                
-                search_prefixes = ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]
-                
-                for prefix in search_prefixes:
+                for prefix in ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]:
                     if lower_text.startswith(prefix):
                         clean_query = clean_query[len(prefix):].strip()
                         is_shopping = True
@@ -1243,7 +918,6 @@ def webhook():
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
                     ).json()
-                    
                     lid = res.get("result", {}).get("message_id")
                     if lid:
                         executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id)
