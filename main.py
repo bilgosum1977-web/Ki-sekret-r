@@ -594,7 +594,7 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         history = get_chat_history(chat_id, limit=10)
         system_prompt = (
             "Du bist 'Code X', ein proaktiver, präziser Einkaufs-Sekretär in einem Telegram-Bot. "
-            "Das heutige Datum ist Samstag, der 12. September 2026. "
+            "Das heutige Datum ist Sonntag, der 13. September 2026. "
             "Erfinde keine Fakten, sondern halte dich strikt an die gelieferten Web-Daten oder das Dossier. "
             "WICHTIG für Buttons: Erstelle kurze, prägnante, KONTEXTBEZOGENE Aktions-Buttons (maximal 15-18 Zeichen), die genau zum Thema passen! "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
@@ -926,7 +926,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query == "restart":
                 set_user_fact(chat_id, "bot_state", None)
-                nachricht = "🤖 **Hauptmenü:** Hallo! Was möchtest du suchen oder als Einkaufs-Sekretär erledigen lassen? (z. B. *Suche Samsung Galaxy S26*)"
+                nachricht = "🤖 **Hauptmenü:** Hallo! What möchtest du suchen oder als Einkaufs-Sekretär erledigen lassen? (z. B. *Suche Samsung Galaxy S26*)"
                 buttons = [
                     {"text": "📍 Standort setzen", "callback": "ask_location"},
                     {"text": "🌤️ Wetter", "callback": "wetter"}
@@ -1008,7 +1008,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     nachricht = "📍 **Standort fehlt!**\n\nBitte setze zuerst deinen Standort."
                     buttons = [{"text": "📍 Standort setzen", "callback": "ask_location"}]
                 else:
-                    raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 12. September 2026")
+                    raw_web_data = fetch_raw_web_data(f"Wetter {location} aktuell 13. September 2026")
                     clean_context = master_data_cleaner_and_boss(raw_web_data, f"Wetter {location}")
                     source_info = f"Wetter-Live-Suche für {location}"
                     groq_result = ask_groq(chat_id, f"Gib mir das aktuelle Wetter für {location}.", web_context=clean_context)
