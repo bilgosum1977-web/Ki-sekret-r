@@ -584,7 +584,7 @@ def execute_final_github_update(chat_id: str) -> str:
 
 
 # =====================================================================
-# APIFY ACTOR STARTEN & POLLING
+# APIFY ACTOR STARTEN & POLLING (NUR BEI PREMIUM-TRIGGER)
 # =====================================================================
 def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_items: int = 10):
     if not APIFY_TOKEN:
@@ -761,7 +761,7 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR
+# ASYNCHRONER PROZESSOR (MIT TEXT-WEICHE & KOSTENKONTROLLE)
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     print(f"🔄 Thread für Chat {chat_id} (Callback: {is_callback}, Media: {media_type}, Query: '{query}')", flush=True)
@@ -772,7 +772,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         buttons = []
         nachricht = ""
         image_to_send = None
-        lower_q = query.lower()
+        lower_q = query.lower() if query else ""
 
         current_state = get_user_fact(chat_id, "bot_state")
         
@@ -809,15 +809,12 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     source_info = f"SQLite-Cache (Top {limit_num})"
                     produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
                 else:
-                    source_info = f"Apify Live-Suche (Top {limit_num})"
-                    raw_data = run_apify_actor(product_name, "junglee~amazon-crawler", max_items=limit_num)
-                    if raw_data:
-                        speichere_produkte(product_name, raw_data, "Amazon")
+                    source_info = f"SQLite-Cache (Top {limit_num} - Keine Live-Abfrage ohne Premium)"
                     produkte = hole_aus_db(product_name, limit=limit_num, accessories_only=False)
 
                 if not produkte:
-                    nachricht = f"⚠️ Keine Angebote für '{product_name}' gefunden."
-                    buttons = [{"text": "🔄 Neu suchen", "callback": "restart"}]
+                    nachricht = f"⚠️ Keine Angebote für '{product_name}' im Cache gefunden. Möchtest du die kostenpflichtige Live-Suche (Pro) starten?"
+                    buttons = [{"text": "💎 Live-Suche (Pro)", "callback": "live_search_pro"}, {"text": "🏠 Hauptmenü", "callback": "restart"}]
                 else:
                     top_prod = produkte[0]
                     name, preis, url, shop, image_url, lieferzeit = top_prod
@@ -861,16 +858,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query.startswith("accessories_"):
                 product_name = query.replace("accessories_", "").strip()
-                zubehör_query = f"{product_name} Zubehör Hülle Schutzfolie"
                 z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
-                if not z_produkte:
-                    raw_z = run_apify_actor(zubehör_query, "junglee~amazon-crawler", max_items=5)
-                    if raw_z:
-                        speichere_produkte(product_name, raw_z, "Amazon")
-                    z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
 
                 if not z_produkte:
-                    nachricht = f"⚠️ Aktuell kein passendes Zubehör für '{product_name}' gefunden."
+                    nachricht = f"⚠️ Aktuell kein passendes Zubehör im Cache für '{product_name}' gefunden."
                     buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
                 else:
                     top_z = z_produkte[0]
@@ -930,7 +921,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query.startswith("execute_live_pro_"):
                 target_query = query.replace("execute_live_pro_", "").strip()
-                send_telegram_photo_or_message(chat_id, f"🚀 Starte Live-Suche für '{target_query}'...", message_id=message_id)
+                send_telegram_photo_or_message(chat_id, f"🚀 Starte kostenpflichtige Live-Suche für '{target_query}'...", message_id=message_id)
                 raw_data = run_apify_actor(target_query, "junglee~amazon-crawler", 10)
                 if raw_data:
                     speichere_produkte(target_query, raw_data, "Amazon")
@@ -982,11 +973,26 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 except Exception:
                     pass
 
+                # --- NEUE TEXT-WEICHE & SCHUTZ VOR UNGEWOLLTEM SHOPPING ---
+                commercial_keywords = ["verkaufen", "kaufen", "preis", "kosten", "shop", "suche", "euro", "€"]
+                is_commercial_intent = any(kw in lower_q for kw in commercial_keywords) if query else False
+
+                if is_commercial_intent:
+                    intent_instruction = (
+                        "Der Nutzer hat explizites Kauf- oder Verkaufsinteresse geäussert. "
+                        "Erstelle passende Produkt- oder Kauf-Buttons."
+                    )
+                else:
+                    intent_instruction = (
+                        "WICHTIG: Der Nutzer hat KEIN Kauf- oder Verkaufsinteresse geäussert (normales Foto, Landschaft oder Motiv). "
+                        "Erstelle KEINE Kauf-Buttons! Biete stattdessen sinnvolle Info-Buttons an (z.B. 'ℹ️ Mehr Infos', '🗺️ Ort anzeigen' oder '🔄 Neues Bild')."
+                    )
+
                 enhanced_query = (
                     f"{query or 'Analysiere dieses Bild.'}\n\n"
-                    f"WICHTIG: Erstelle exakt zum erkannten Produkt passende, kurze Aktions-Buttons "
-                    f"(z.B. passende Ersatzteile, Bedienungsanleitung oder Direktkauf), keine generischen Standard-Buttons!"
+                    f"{intent_instruction}"
                 )
+                
                 groq_result = ask_groq(chat_id, enhanced_query, web_context=media_dossier)
                 nachricht = groq_result["antwort_text"]
                 buttons = groq_result["buttons"]
@@ -1006,8 +1012,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             buttons = [{"text": "Top 3", "callback": "limit_3"}, {"text": "10 Ergebnisse", "callback": "limit_10"}]
 
         else:
-            clean_q = query.lower().strip()
-            if "wetter" in clean_q:
+            if "wetter" in lower_q:
                 location = get_user_fact(chat_id, "location")
                 if not location:
                     nachricht = "📍 **Standort fehlt!** Bitte setze zuerst deinen Standort."
@@ -1021,7 +1026,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     buttons = groq_result["buttons"]
             else:
                 smalltalk_words = ["hallo", "hi", "hey", "alles klar", "danke", "wie geht's", "gut", "moin", "servus", "ok"]
-                if clean_q in smalltalk_words or len(clean_q) < 4:
+                if lower_q in smalltalk_words or len(lower_q) < 4:
                     source_info = "Direkter Smalltalk"
                     groq_result = ask_groq(chat_id, query)
                     nachricht = groq_result["antwort_text"]
@@ -1031,10 +1036,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                         source_info = "GitHub Self-Update Executor"
                         nachricht = execute_final_github_update(chat_id)
                     else:
-                        # Python ruft DuckDuckGo & SearXNG auf und füttert den Boss-Filter!
+                        # Kostenlose Web-Suche via DuckDuckGo & SearXNG + Boss-Filter
                         raw_web_data = fetch_raw_web_data(query)
                         clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                        source_info = "DuckDuckGo + SearXNG & Boss-Filter"
+                        source_info = "DuckDuckGo + SearXNG & Boss-Filter (Kostenlos)"
                         groq_result = ask_groq(chat_id, query, web_context=clean_context)
                         nachricht = groq_result["antwort_text"]
                         buttons = groq_result["buttons"]
