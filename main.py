@@ -633,7 +633,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_it
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION (MIT `openai/gpt-oss-20b`)
+# GROQ KI CHAT-FUNKTION
 # =====================================================================
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not GROQ_API_KEY:
@@ -1031,9 +1031,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                         source_info = "GitHub Self-Update Executor"
                         nachricht = execute_final_github_update(chat_id)
                     else:
+                        # Python ruft DuckDuckGo & SearXNG auf und füttert den Boss-Filter!
                         raw_web_data = fetch_raw_web_data(query)
                         clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                        source_info = "Boss-Filter & Groq Analyse"
+                        source_info = "DuckDuckGo + SearXNG & Boss-Filter"
                         groq_result = ask_groq(chat_id, query, web_context=clean_context)
                         nachricht = groq_result["antwort_text"]
                         buttons = groq_result["buttons"]
