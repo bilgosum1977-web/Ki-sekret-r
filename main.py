@@ -133,7 +133,7 @@ init_db()
 
 
 # =====================================================================
-# MULTIMODAL & VISION PIPELINE (QWEN FALLBACK-KETTE)
+# MULTIMODAL & VISION PIPELINE (QWEN FALLBACK-KETTE & TIEFENANALYSE)
 # =====================================================================
 def download_telegram_file(file_id: str) -> str:
     try:
@@ -158,28 +158,35 @@ def download_telegram_file(file_id: str) -> str:
 def analyze_image_and_create_dossier(image_path: str) -> str:
     try:
         if not os.path.exists(image_path):
-            return "BILD-DOSSIER VOM VISION-FILTER: Bilddatei nicht gefunden."
+            return "BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse): Bilddatei nicht gefunden."
             
         with open(image_path, "rb") as image_file:
             base64_image = base64.b64encode(image_file.read()).decode('utf-8')
         
         if not GROQ_API_KEY:
-            return "BILD-DOSSIER VOM VISION-FILTER: API-Key fehlt."
+            return "BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse): API-Key fehlt."
 
         vision_models = ["qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
         completion = None
         last_error = None
 
+        vision_prompt = (
+            "Analysiere dieses Bild hochpräzise und liefere ein strukturiertes Dossier mit folgenden Punkten auf Deutsch:\n"
+            "1. **Kerninhalt:** Was ist exakt auf dem Bild zu sehen (Gegenstände, Personen, Umgebung, Text/Logos)?\n"
+            "2. **Echtheits- & KI-Check:** Gibt es visuelle Artefakte, unnatürliche Übergänge, Textfehler oder typische Merkmale, die auf ein KI-generiertes Bild oder eine Bildmanipulation (Fake) hindeuten? Begründe kurz.\n"
+            "3. **Erweiterte Eigenschaften:** Besondere Details, Materialien, Stimmungen, Metadaten-Hinweise oder technische Auffälligkeiten."
+        )
+
         for model_name in vision_models:
             try:
-                print(f"Versuche Bildanalyse mit Modell: {model_name}", flush=True)
+                print(f"Versuche erweiterte Bildanalyse mit Modell: {model_name}", flush=True)
                 completion = groq_client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "Analysiere dieses Bild exakt und detailliert. Erkenne Gegenstände, Gebäude, Orte, Produkte, Schriften oder Logos. Fasse deine Erkenntnisse präzise auf Deutsch zusammen."},
+                                {"type": "text", "text": vision_prompt},
                                 {
                                     "type": "image_url",
                                     "image_url": {
@@ -189,8 +196,8 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
                             ]
                         }
                     ],
-                    temperature=0.2,
-                    max_tokens=400
+                    temperature=0.1,
+                    max_tokens=600
                 )
                 break
             except Exception as model_err:
@@ -204,8 +211,8 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
         ai_description = completion.choices[0].message.content
         
         dossier = (
-            f"BILD-DOSSIER VOM VISION-FILTER (KI-Echtzeitanalyse):\n"
-            f"• Inhalt / Erkennung: {ai_description}\n"
+            f"BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse):\n"
+            f"{ai_description}\n"
         )
         
         if OPENCV_AVAILABLE:
@@ -213,13 +220,13 @@ def analyze_image_and_create_dossier(image_path: str) -> str:
                 img = cv2.imread(image_path)
                 if img is not None:
                     h, w, _ = img.shape
-                    dossier += f"• Bild-Metadaten: Auflösung {w}x{h} Pixel.\n"
+                    dossier += f"• Technische Auflösung: {w}x{h} Pixel.\n"
             except Exception:
                 pass
         return dossier
     except Exception as e:
         print(f"❌ Fehler bei Groq Vision API: {e}", flush=True)
-        return "BILD-DOSSIER VOM VISION-FILTER: Fehler bei der KI-Bildanalyse."
+        return "BILD-DOSSIER VOM VISION-FILTER (Tiefen- & Echtheitsanalyse): Fehler bei der KI-Bildanalyse."
 
 def process_video_and_create_dossier(video_path: str) -> str:
     dossier = "VIDEO-DOSSIER VOM VIDEO-PROZESSOR:\n"
@@ -955,7 +962,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 nachricht = f"❌ Fehler beim Herunterladen der {media_type}-Datei."
             else:
                 if media_type == "image":
-                    source_info = "Vision-Pipeline (Qwen Fallback)"
+                    source_info = "Vision-Pipeline (Tiefen- & Echtheitsanalyse)"
                     media_dossier = analyze_image_and_create_dossier(local_path)
                 elif media_type == "video":
                     source_info = "Video-Pipeline"
