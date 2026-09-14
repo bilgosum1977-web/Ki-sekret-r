@@ -946,14 +946,14 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
 
 # =====================================================================
-# NEUER HINTERGRUND-TASK MIT ADMIN-TRACKING & KEYBOARDS
+# HINTERGRUND-TASK MIT CHEF-LOGIK & ADMIN-TRACKING
 # =====================================================================
 def frage_groq_mit_boss_dossier(boss_packet, user_query):
     res = ask_groq("admin_proxy_eval", user_query, web_context=boss_packet)
     return res.get("antwort_text", "Keine Antwort generiert.")
 
 def hintergrund_task_such_engine(chat_id, user_query, user_info):
-    """Verarbeitet die Suche und sendet detaillierte System-Infos an den Admin"""
+    """Verarbeitet die Suche, prüft auf Smalltalk und leitet Statistiken an den Admin"""
     try:
         username = user_info.get("username", "Kein Username")
         first_name = user_info.get("first_name", "Unbekannt")
@@ -965,6 +965,27 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": ADMIN_CHAT_ID, "text": admin_start_msg, "parse_mode": "Markdown"})
 
+        # --- CHEF-LOGIK FÜR SMALLTALK ---
+        smalltalk_words = ["hallo", "hi", "servus", "moin", "wer bist du", "hilfe", "hey"]
+        if user_query.lower().strip() in smalltalk_words or len(user_query) < 4:
+            print(f"[Chef] Smalltalk erkannt: '{user_query}'. Überspringe Websuche.", flush=True)
+            
+            system_prompt = "Du bist ein freundlicher KI-Assistent namens Ki-Sekretär. Begrüße den Nutzer knapp und frage, wie du ihm bei einer Produktsuche oder einem Faktencheck helfen kannst."
+            completion = groq_client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_query}
+                ]
+            )
+            finale_antwort = completion.choices[0].message.content
+            
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                          json={"chat_id": chat_id, "text": finale_antwort})
+            return
+
+        # === ECHTE SUCHEN & TRIANGULATION ===
+        print(f"[Chef] Echte Suchanfrage erkannt: {user_query}. Starte Triangulation...", flush=True)
         quellen_statistik = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
         
         raw_data = fetch_raw_web_data_with_stats(user_query, max_results=5, stats_dict=quellen_statistik)
@@ -976,6 +997,7 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
             f"➔ SearXNG Treffer: {quellen_statistik['SearXNG']}\n"
             f"➔ Beautiful Soup Deep-Scrapes: {quellen_statistik['BeautifulSoup_DeepScrape']}"
         )
+        # Korrigiert: Geht jetzt strikt an den Admin-Chat, nicht an den User!
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": ADMIN_CHAT_ID, "text": admin_data_msg, "parse_mode": "Markdown"})
 
@@ -984,7 +1006,6 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
         else:
             finale_antwort = "Entschuldigung, ich konnte keine verlässlichen Daten finden."
             
-        # Inline-Keyboards für globale und regionale Suche eingebunden
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "🌐 Globale Web-Suche", "callback_data": "web_suche"}],
@@ -1104,7 +1125,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             if ADMIN_USER_ID and str(chat_id) != ADMIN_USER_ID:
                 admin_log = f"🕵️‍♂️ **Sekretär-Protokoll:**\n👤 User: `{chat_id}`\n🔍 Suche: `{gemerkte_suche}`\n📍 Ort: `{loc}`\n📡 Modus: Regional ({daten_quelle})"
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": ADMIN_USER_ID, "text": admin_log, "parse_mode": "Markdown"})
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": ADMIN_CHAT_ID, "text": admin_log, "parse_mode": "Markdown"})
 
             endkunden_preis = (ECHTE_SCRAPING_KOSTEN_PRO_RESULTAT * 50) * (1 + DEINE_PROZENTUALE_MARGE)
             buttons.append({"text": f"💎 Premium Live-Suche freischalten ({endkunden_preis:.2f}€)", "callback": "premium_info"})
@@ -1202,7 +1223,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     speichere_produkte(l_query, raw_data, "Amazon")
                 if ADMIN_USER_ID:
                     admin_finanz_log = f"💰 Finanz-Log:\n👤 User: {chat_id}\n📉 Echte Kosten: {echte_kosten:.3f}€\n📈 User-Preis: {endpreis:.2f}€\n💵 Marge (Gewinn): {(endpreis - echte_kosten):.3f}€"
-                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": ADMIN_USER_ID, "text": admin_finanz_log, "parse_mode": "Markdown"})
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": ADMIN_CHAT_ID, "text": admin_finanz_log, "parse_mode": "Markdown"})
                 produkte = hole_aus_db(l_query, limit=3, accessories_only=False)
                 if produkte:
                     name, preis, url, shop, image_url, _ = produkte[0]
@@ -1226,7 +1247,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         if is_shopping:
             clean_search = user_input_text
             set_user_fact(chat_id, "last_user_query", clean_search)
-            nachricht = f"🛍️ Suchanfrage für '{clean_search}' registriert.\n\ Wie möchtest du verfahren?"
+            nachricht = f"🛍️ Suchanfrage für '{clean_search}' registriert.\n\nWie möchtest du verfahren?"
             buttons = [{"text": "🌐 Im Web suchen (Gratis)", "callback": "web_suche"}, {"text": "📍 Regionale Suche (Ort)", "callback": "regio_suche"}]
             send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
             return
@@ -1341,7 +1362,6 @@ def webhook():
                     if lid:
                         bg_executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
                 else:
-                    # Hier greift nun dein neuer Hintergrund-Task mit Admin-Tracking & Statistik
                     bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query, user_info)
                 
                 return {"status": "processing"}, 200
