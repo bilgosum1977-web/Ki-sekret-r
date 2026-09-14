@@ -49,6 +49,7 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", ADMIN_USER_ID)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_KEY")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
@@ -266,7 +267,7 @@ def check_incoming_emails_and_forward():
     except Exception as e:
         print(f"❌ IMAP-Fehler beim Postfach-Check: {e}")
 
-def fetch_raw_web_data(query, max_results=5):
+def fetch_raw_web_data_with_stats(query, max_results=5, stats_dict=None):
     results = []
     if DDGS is not None:
         try:
@@ -277,6 +278,8 @@ def fetch_raw_web_data(query, max_results=5):
                         "snippet": r.get("body", ""),
                         "link": r.get("href", "")
                     })
+                    if stats_dict is not None:
+                        stats_dict["DuckDuckGo"] += 1
         except Exception as e:
             print(f"[Info] DDG Search fehlgeschlagen: {e}", flush=True)
     
@@ -291,6 +294,8 @@ def fetch_raw_web_data(query, max_results=5):
                         "snippet": r.get("content", ""),
                         "link": r.get("url", "")
                     })
+                    if stats_dict is not None:
+                        stats_dict["SearXNG"] += 1
         except Exception as e:
             print(f"[Info] SearXNG Search fehlgeschlagen: {e}", flush=True)
     return results
@@ -318,7 +323,6 @@ def check_if_search_needed(query: str) -> bool:
     return True
 
 def hole_seite_einzeln(link, headers):
-    """Hilfsfunktion: Lädt eine einzelne Seite und bereinigt sie mit Beautiful Soup."""
     try:
         res = requests.get(link, headers=headers, timeout=3)
         if res.status_code == 200:
@@ -330,7 +334,7 @@ def hole_seite_einzeln(link, headers):
         pass
     return None
 
-def master_data_cleaner_and_boss(raw_results, user_query):
+def master_data_cleaner_and_boss(raw_results, user_query, stats_dict=None):
     if not check_if_search_needed(user_query) or not raw_results:
         return ""
 
@@ -381,7 +385,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
             "link": link, "status": status_tag, "priority": priority
         })
 
-    # Wir sammeln alle offiziellen Links (Priorität 3), die wir tief scannen wollen
     offizielle_links = [item["link"] for item in processed_items if item["priority"] == 3]
 
     if offizielle_links:
@@ -397,9 +400,11 @@ def master_data_cleaner_and_boss(raw_results, user_query):
                         for item in processed_items:
                             if item["link"] == link:
                                 item["snippet"] = tiefen_text + "... [Volltext-Upgrade via Beautiful Soup]"
+                                if stats_dict is not None:
+                                    stats_dict["BeautifulSoup_DeepScrape"] += 1
                                 print(f"[Erfolg] Deep-Scraping beendet für: {item['domain']}", flush=True)
             except concurrent.futures.TimeoutError:
-                print("⚠️ [Zeitlimit erreicht] Deep-Scraping dauerte länger als 10 Sekunden. Breche ab für schnelle Bot-Antwort!", flush=True)
+                print("⚠️ [Zeitlimit erreicht] Deep-Scraping dauerte länger als 10 Sekunden.", flush=True)
 
     processed_items.sort(key=lambda x: x["priority"], reverse=True)
     if not processed_items:
@@ -941,7 +946,61 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR (DAS MASTER-KONTROLLZENTRUM)
+# NEUER HINTERGRUND-TASK MIT ADMIN-TRACKING & KEYBOARDS
+# =====================================================================
+def frage_groq_mit_boss_dossier(boss_packet, user_query):
+    res = ask_groq("admin_proxy_eval", user_query, web_context=boss_packet)
+    return res.get("antwort_text", "Keine Antwort generiert.")
+
+def hintergrund_task_such_engine(chat_id, user_query, user_info):
+    """Verarbeitet die Suche und sendet detaillierte System-Infos an den Admin"""
+    try:
+        username = user_info.get("username", "Kein Username")
+        first_name = user_info.get("first_name", "Unbekannt")
+        admin_start_msg = (
+            f"👤 **Neuer Request!**\n"
+            f"Von: {first_name} (@{username}) [ID: {chat_id}]\n"
+            f"Anfrage: `{user_query}`"
+        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                      json={"chat_id": ADMIN_CHAT_ID, "text": admin_start_msg, "parse_mode": "Markdown"})
+
+        quellen_statistik = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
+        
+        raw_data = fetch_raw_web_data_with_stats(user_query, max_results=5, stats_dict=quellen_statistik)
+        boss_packet = master_data_cleaner_and_boss(raw_data, user_query, stats_dict=quellen_statistik)
+        
+        admin_data_msg = (
+            f"📊 **System-Datenabruf für:** `{user_query}`\n"
+            f"➔ DuckDuckGo Treffer: {quellen_statistik['DuckDuckGo']}\n"
+            f"➔ SearXNG Treffer: {quellen_statistik['SearXNG']}\n"
+            f"➔ Beautiful Soup Deep-Scrapes: {quellen_statistik['BeautifulSoup_DeepScrape']}"
+        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                      json={"chat_id": ADMIN_CHAT_ID, "text": admin_data_msg, "parse_mode": "Markdown"})
+
+        if boss_packet:
+            finale_antwort = frage_groq_mit_boss_dossier(boss_packet, user_query)
+        else:
+            finale_antwort = "Entschuldigung, ich konnte keine verlässlichen Daten finden."
+            
+        # Inline-Keyboards für globale und regionale Suche eingebunden
+        reply_markup = {
+            "inline_keyboard": [
+                [{"text": "🌐 Globale Web-Suche", "callback_data": "web_suche"}],
+                [{"text": "📍 Regionale Suche", "callback_data": "regio_suche"}]
+            ]
+        }
+        
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                      json={"chat_id": chat_id, "text": finale_antwort, "parse_mode": "Markdown", "reply_markup": reply_markup})
+
+    except Exception as e:
+        print(f"[Fehler im Hintergrund]: {e}", flush=True)
+
+
+# =====================================================================
+# ASYNCHRONER PROZESSOR FÜR SHOPPING & CALLBACKS
 # =====================================================================
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     try:
@@ -1014,8 +1073,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             if not produkte:
                 daten_quelle = "Kostenlose Suchmaschine (DuckDuckGo/SearXNG)"
                 if check_if_search_needed(such_string_mit_ort):
-                    raw_web_data = fetch_raw_web_data(such_string_mit_ort)
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort)
+                    dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
+                    raw_web_data = fetch_raw_web_data_with_stats(such_string_mit_ort, max_results=5, stats_dict=dummy_stats)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort, stats_dict=dummy_stats)
                     if clean_context:
                         groq_result = ask_groq(chat_id, f"Finde Angebote zu {such_string_mit_ort}", web_context=clean_context)
                         nachricht = f"🌐 **Kostenlose Marktanalyse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
@@ -1055,7 +1115,15 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             return
 
         if is_callback:
-            if query.startswith("limit_"):
+            if query == "web_suche":
+                set_user_fact(chat_id, "bot_state", None)
+                send_telegram_photo_or_message(chat_id, "🌐 Globale Websuche ausgewählt. Welches Produkt oder Thema möchtest du prüfen?", message_id=message_id)
+                return
+            elif query == "regio_suche":
+                set_user_fact(chat_id, "bot_state", "waiting_for_location")
+                send_telegram_photo_or_message(chat_id, "📍 Bitte nenne mir deine Stadt für regionale Ergebnisse (z. B. Gelsenkirchen):", message_id=message_id, buttons=[{"text": "❌ Abbrechen", "callback": "restart"}])
+                return
+            elif query.startswith("limit_"):
                 parts = query.split("_")
                 limit_num = int(parts[1]) if len(parts) > 1 else 3
                 product_name = get_user_fact(chat_id, "last_user_query") or "radkappen"
@@ -1090,20 +1158,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
                 return
 
-            elif query.startswith("accessories_"):
-                product_name = query.replace("accessories_", "").strip()
-                z_produkte = hole_aus_db(product_name, limit=5, accessories_only=True)
-                if not z_produkte:
-                    nachricht = f"⚠️ Kein passendes Zubehör für '{product_name}' gefunden."
-                    buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
-                else:
-                    z_name, z_preis, z_url, z_shop, z_image, _ = z_produkte[0]
-                    image_to_send = z_image
-                    nachricht = f"🔌 Zubehör für {product_name}:\n\n📦 {z_name}\n💰 Preis: {z_preis} | 🛒 Anbieter: {z_shop}\n"
-                    buttons = [{"text": "🛒 Zum Shop", "callback": f"open_link:{z_url}"}, {"text": "🏠 Hauptmenü", "callback": "restart"}]
-                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
-                return
-
             elif query.startswith("agent_negotiate:"):
                 p_name = query.replace("agent_negotiate:", "").strip()
                 prompt = f"Schreibe ein extrem höfliches Verhandlungsangebot für '{p_name}'. Wir wollen den Preis geschickt um 10-15% drücken. Erstelle nur den reinen Text."
@@ -1123,7 +1177,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             elif query.startswith("premium_price_check:"):
                 s_term = query.replace("premium_price_check:", "").strip()
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"🌐 Auftrag erteilt. Durchsuche das Web nach Spar-Angeboten für '{s_term}'...", "parse_mode": "Markdown"})
-                clean_context = master_data_cleaner_and_boss(fetch_raw_web_data(s_term), s_term)
+                dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
+                clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(s_term, max_results=5, stats_dict=dummy_stats), s_term, stats_dict=dummy_stats)
                 nachricht = f"📉 Online-Gegenanalyse für '{s_term}':\n\n" + ask_groq(chat_id, f"Günstige Web-Angebote für {s_term}", web_context=clean_context).get("antwort_text", "")
                 endkunden_preis = (ECHTE_SCRAPING_KOSTEN_PRO_RESULTAT * 50) * (1 + DEINE_PROZENTUALE_MARGE)
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=[{"text": f"💎 Premium-Suche ({endkunden_preis:.2f}€)", "callback": "premium_info"}, {"text": "🏠 Menü", "callback": "restart"}])
@@ -1156,20 +1211,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     send_telegram_photo_or_message(chat_id, nachricht, image_url=image_url, message_id=message_id, buttons=buttons)
                 return
 
-            elif query == "search_mode_web":
-                g_suche = get_user_fact(chat_id, "last_user_query") or "radkappen"
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"🌐 Globale Web-Suche nach '{g_suche}' gestartet..."})
-                clean_context = master_data_cleaner_and_boss(fetch_raw_web_data(g_suche), g_suche)
-                nachricht = f"🌐 Globale Web-Analyse:\n\n" + ask_groq(chat_id, f"Angebote zu {g_suche}", web_context=clean_context).get("antwort_text", "")
-                endkunden_preis = (ECHTE_SCRAPING_KOSTEN_PRO_RESULTAT * 50) * (1 + DEINE_PROZENTUALE_MARGE)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=[{"text": f"💎 Premium Live-Suche ({endkunden_preis:.2f}€)", "callback": "premium_info"}, {"text": "🏠 Menü", "callback": "restart"}])
-                return
-
-            elif query == "search_mode_regional":
-                set_user_fact(chat_id, "bot_state", "waiting_for_location")
-                send_telegram_photo_or_message(chat_id, "📍 Bitte nenne mir deine Stadt für regionale Ergebnisse (z. B. Gelsenkirchen):", message_id=message_id, buttons=[{"text": "❌ Abbrechen", "callback": "restart"}])
-                return
-
+            elif query == "open_link:":
+                pass
             elif query.startswith("open_link:"):
                 target_url = query.replace("open_link:", "").strip()
                 send_telegram_photo_or_message(chat_id, f"🔗 Direkter Link zum Angebot:\n{target_url}", message_id=message_id, buttons=[{"text": "🏠 Hauptmenü", "callback": "restart"}])
@@ -1177,14 +1220,14 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query == "restart":
                 set_user_fact(chat_id, "bot_state", None)
-                send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! Was kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "search_mode_regional"}])
+                send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! Was kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "regio_suche"}])
                 return
 
         if is_shopping:
             clean_search = user_input_text
             set_user_fact(chat_id, "last_user_query", clean_search)
-            nachricht = f"🛍️ Suchanfrage für '{clean_search}' registriert.\n\nWie möchtest du verfahren?"
-            buttons = [{"text": "🌐 Im Web suchen (Gratis)", "callback": "search_mode_web"}, {"text": "📍 Regionale Suche (Ort)", "callback": "search_mode_regional"}]
+            nachricht = f"🛍️ Suchanfrage für '{clean_search}' registriert.\n\ Wie möchtest du verfahren?"
+            buttons = [{"text": "🌐 Im Web suchen (Gratis)", "callback": "web_suche"}, {"text": "📍 Regionale Suche (Ort)", "callback": "regio_suche"}]
             send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
             return
         else:
@@ -1194,7 +1237,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             else:
                 clean_context = ""
                 if check_if_search_needed(user_input_text):
-                    clean_context = master_data_cleaner_and_boss(fetch_raw_web_data(user_input_text), user_input_text)
+                    dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
+                    clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(user_input_text, max_results=5, stats_dict=dummy_stats), user_input_text, stats_dict=dummy_stats)
                 vollstaendiger_kontext = (medien_dossier + "\n\n" + clean_context).strip()
                 ki_frage = user_input_text if user_input_text else "Beschreibe und analysiere das Medium präzise."
                 nachricht = ask_groq(chat_id, ki_frage, web_context=vollstaendiger_kontext).get("antwort_text", "")
@@ -1232,6 +1276,7 @@ def webhook():
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
+            user_info = msg.get("from", {})  # Holt Vorname, Nachname, Username
             
             media_type, file_id, caption = None, None, msg.get("caption", "")
             if "photo" in msg:
@@ -1287,7 +1332,7 @@ def webhook():
                 if "zoll" in lower_text or "radkappen" in lower_text:
                     is_shopping = True
 
-                if TELEGRAM_BOT_TOKEN:
+                if is_shopping:
                     res = requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
@@ -1295,6 +1340,9 @@ def webhook():
                     lid = res.get("result", {}).get("message_id")
                     if lid:
                         bg_executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
+                else:
+                    # Hier greift nun dein neuer Hintergrund-Task mit Admin-Tracking & Statistik
+                    bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query, user_info)
                 
                 return {"status": "processing"}, 200
 
@@ -1317,9 +1365,5 @@ master_scheduler.start()
 
 # --- SERVER START ---
 if __name__ == '__main__':
-    # Erlaubt Render, den Port dynamisch zuzuweisen (Standardport ist 5000)
     port = int(os.environ.get("PORT", 5000))
-    
-    # JETZT REPARIERT: host als String in Anführungszeichen!
     app.run(host="0.0.0.0", port=port, debug=False)
-
