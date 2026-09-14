@@ -1069,6 +1069,7 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     try:
         user_input_text = query.strip() if query else ""
+        lower_query = user_input_text.lower()
         
         if user_input_text and not is_callback:
             analyze_and_update_user_pattern(chat_id, user_input_text)
@@ -1177,6 +1178,32 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             
             save_message(chat_id, "assistant", nachricht)
             send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, buttons=buttons)
+            return
+
+        # 1. BEDIENUNG DES PREMIUM-MENÜS (Professionelle Vorteilserklärung OHNE Technik-Details!)
+        if is_callback and lower_query == "premium_suche_menue":
+            reply_markup = {
+                "inline_keyboard": [
+                    [{"text": "🚀 Premium-Suche starten (0.15 €)", "callback_data": "start_premium_crawl"}],
+                    [{"text": "❌ Zurück", "callback_data": "hauptmenue"}]
+                ]
+            }
+            
+            # Der neue, anonymisierte Text ohne technische Begriffe:
+            premium_text = (
+                "💎 **Premium-Live-Suche Meilenstein** 🚀\n\n"
+                "Du benötigst die absolut besten und aktuellsten Angebote auf dem Markt? "
+                "Unsere Premium-Suche schaltet die maximale Leistungsstufe des Systems frei:\n\n"
+                "⚡ **Deine exklusiven Premium-Vorteile:**\n"
+                "• **Maximale Marktabdeckung:** Das System durchsucht zeitgleich über fünfzig Marktplätze, Fachshops und Portale parallel in Sekundenschnelle.\n"
+                "• **Garantierte Produktbilder:** Du erhältst zu jedem gefundenen Angebot direkt das passende Bild im Chat angezeigt.\n"
+                "• **Intelligente Bestpreis-Garantie:** Das System filtert unseriöse Anbieter automatisch heraus, vergleicht Versandkosten und ermittelt den echten Tiefpreis.\n"
+                "• **Live-Verfügbarkeitscheck:** Die Angebote werden im selben Moment geprüft, um sicherzustellen, dass das Produkt auch wirklich sofort lieferbar ist.\n\n"
+                "💳 **Kosten pro Abfrage:** Einmalig **0.15 €** (wird von deinem Bot-Guthaben abgezogen)."
+            )
+            
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                          json={"chat_id": chat_id, "text": premium_text, "parse_mode": "Markdown", "reply_markup": reply_markup})
             return
 
         if is_callback:
