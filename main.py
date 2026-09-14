@@ -1316,6 +1316,10 @@ master_scheduler.add_job(daily_autopilot_job, 'interval', days=1)
 master_scheduler.start()
 
 # --- SERVER START ---
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(0.0.0.0, port=port, debug=False)
+if __name__ == '__main__':
+    # Erlaubt Render, den Port dynamisch zuzuweisen (Standardport ist 5000)
+    port = int(os.environ.get("PORT", 5000))
+    
+    # JETZT REPARIERT: host als String in Anführungszeichen!
+    app.run(host="0.0.0.0", port=port, debug=False)
+
