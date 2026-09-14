@@ -1314,11 +1314,11 @@ def webhook():
             msg_id = cq["message"]["message_id"]
             
             # Telegram den Erhalt des Klicks bestätigen
-            requests.post(f"https://api.telegram.org{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
             
             # Wenn ein Such-Button geklickt wurde, leiten wir es direkt als Suchbegriff weiter
             if callback_data in ["web_suche", "regio_suche"]:
-                requests.post(f"https://api.telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                               json={"chat_id": chat_id, "text": "🔮 Modus aktiviert. Bitte gib jetzt dein Produkt oder Thema ein:"})
             else:
                 # Fallback für andere Buttons
@@ -1347,7 +1347,7 @@ def webhook():
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                     if command_part == "ja":
                         res = requests.post(
-                            f"https://api.telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": "⏳ Führe GitHub Update aus...", "parse_mode": "Markdown"}
                         ).json()
                         bg_executor.submit(hintergrund_task_such_engine, chat_id, "ja")
@@ -1358,7 +1358,7 @@ def webhook():
                         
                         res_msg = update_github_code(chat_id, file_path, new_content)
                         requests.post(
-                            f"https://api.telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": res_msg, "parse_mode": "Markdown"}
                         )
                     return {"status": "processing"}, 200
@@ -1383,7 +1383,7 @@ def webhook():
                 # Wenn es ein Shopping-Inhalt oder eine normale Textnachricht ist:
                 # Wir schicken die Sanduhr ab
                 requests.post(
-                    f"https://api.telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
                 )
                 
