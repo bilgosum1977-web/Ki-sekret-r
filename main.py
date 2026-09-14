@@ -267,7 +267,7 @@ def check_incoming_emails_and_forward():
     except Exception as e:
         print(f"❌ IMAP-Fehler beim Postfach-Check: {e}")
 
-def fetch_raw_web_data_with_stats(query, max_results=5, stats_dict=None):
+def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_dict=None):
     results = []
     if DDGS is not None:
         try:
@@ -280,6 +280,8 @@ def fetch_raw_web_data_with_stats(query, max_results=5, stats_dict=None):
                     })
                     if stats_dict is not None:
                         stats_dict["DuckDuckGo"] += 1
+            if results and "🦆 DuckDuckGo" not in genutzte_quellen:
+                genutzte_quellen.append("🦆 DuckDuckGo")
         except Exception as e:
             print(f"[Info] DDG Search fehlgeschlagen: {e}", flush=True)
     
@@ -296,6 +298,8 @@ def fetch_raw_web_data_with_stats(query, max_results=5, stats_dict=None):
                     })
                     if stats_dict is not None:
                         stats_dict["SearXNG"] += 1
+                if results and "🔍 SearXNG" not in genutzte_quellen:
+                    genutzte_quellen.append("🔍 SearXNG")
         except Exception as e:
             print(f"[Info] SearXNG Search fehlgeschlagen: {e}", flush=True)
     return results
@@ -334,7 +338,7 @@ def hole_seite_einzeln(link, headers):
         pass
     return None
 
-def master_data_cleaner_and_boss(raw_results, user_query, stats_dict=None):
+def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stats_dict=None):
     if not check_if_search_needed(user_query) or not raw_results:
         return ""
 
@@ -402,6 +406,8 @@ def master_data_cleaner_and_boss(raw_results, user_query, stats_dict=None):
                                 item["snippet"] = tiefen_text + "... [Volltext-Upgrade via Beautiful Soup]"
                                 if stats_dict is not None:
                                     stats_dict["BeautifulSoup_DeepScrape"] += 1
+                                if "🥣 Beautiful Soup (Live-Volltext)" not in genutzte_quellen:
+                                    genutzte_quellen.append("🥣 Beautiful Soup (Live-Volltext)")
                                 print(f"[Erfolg] Deep-Scraping beendet für: {item['domain']}", flush=True)
             except concurrent.futures.TimeoutError:
                 print("⚠️ [Zeitlimit erreicht] Deep-Scraping dauerte länger als 10 Sekunden.", flush=True)
@@ -955,6 +961,8 @@ def frage_groq_mit_boss_dossier(boss_packet, user_query):
 def hintergrund_task_such_engine(chat_id, user_query, user_info):
     """Verarbeitet die Suche, prüft auf Smalltalk und leitet Statistiken an den Admin"""
     try:
+        genutzte_quellen = []
+        
         username = user_info.get("username", "Kein Username")
         first_name = user_info.get("first_name", "Unbekannt")
         admin_start_msg = (
@@ -980,16 +988,19 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
             )
             finale_antwort = completion.choices[0].message.content
             
+            if str(chat_id) == str(ADMIN_USER_ID):
+                finale_antwort += "\n\n⚙️ **[ADMIN-INFO]**\n➔ Beantwortet durch: **Groq-Gehirn** (Keine Websuche nötig)"
+            
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                          json={"chat_id": chat_id, "text": finale_antwort})
+                          json={"chat_id": chat_id, "text": finale_antwort, "parse_mode": "Markdown"})
             return
 
         # === ECHTE SUCHEN & TRIANGULATION ===
         print(f"[Chef] Echte Suchanfrage erkannt: {user_query}. Starte Triangulation...", flush=True)
         quellen_statistik = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
         
-        raw_data = fetch_raw_web_data_with_stats(user_query, max_results=5, stats_dict=quellen_statistik)
-        boss_packet = master_data_cleaner_and_boss(raw_data, user_query, stats_dict=quellen_statistik)
+        raw_data = fetch_raw_web_data_with_stats(user_query, genutzte_quellen, max_results=5, stats_dict=quellen_statistik)
+        boss_packet = master_data_cleaner_and_boss(raw_data, user_query, genutzte_quellen, stats_dict=quellen_statistik)
         
         admin_data_msg = (
             f"📊 **System-Datenabruf für:** `{user_query}`\n"
@@ -997,14 +1008,22 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
             f"➔ SearXNG Treffer: {quellen_statistik['SearXNG']}\n"
             f"➔ Beautiful Soup Deep-Scrapes: {quellen_statistik['BeautifulSoup_DeepScrape']}"
         )
-        # Korrigiert: Geht jetzt strikt an den Admin-Chat, nicht an den User!
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": ADMIN_CHAT_ID, "text": admin_data_msg, "parse_mode": "Markdown"})
 
         if boss_packet:
             finale_antwort = frage_groq_mit_boss_dossier(boss_packet, user_query)
+            if str(chat_id) == str(ADMIN_USER_ID):
+                quellen_text = ", ".join(genutzte_quellen) if genutzte_quellen else "Keine (Direktantwort)"
+                finale_antwort += (
+                    f"\n\n⚙️ **[ADMIN-INFO]**\n"
+                    f"➔ Beantwortet durch: **Groq**\n"
+                    f"➔ Daten geliefert von: {quellen_text}"
+                )
         else:
             finale_antwort = "Entschuldigung, ich konnte keine verlässlichen Daten finden."
+            if str(chat_id) == str(ADMIN_USER_ID):
+                finale_antwort += "\n\n⚙️ **[ADMIN-INFO]**\n➔ Boss-Filter war komplett leer."
             
         reply_markup = {
             "inline_keyboard": [
@@ -1095,8 +1114,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 daten_quelle = "Kostenlose Suchmaschine (DuckDuckGo/SearXNG)"
                 if check_if_search_needed(such_string_mit_ort):
                     dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
-                    raw_web_data = fetch_raw_web_data_with_stats(such_string_mit_ort, max_results=5, stats_dict=dummy_stats)
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort, stats_dict=dummy_stats)
+                    dummy_quellen = []
+                    raw_web_data = fetch_raw_web_data_with_stats(such_string_mit_ort, dummy_quellen, max_results=5, stats_dict=dummy_stats)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort, dummy_quellen, stats_dict=dummy_stats)
                     if clean_context:
                         groq_result = ask_groq(chat_id, f"Finde Angebote zu {such_string_mit_ort}", web_context=clean_context)
                         nachricht = f"🌐 **Kostenlose Marktanalyse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
@@ -1199,7 +1219,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 s_term = query.replace("premium_price_check:", "").strip()
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"🌐 Auftrag erteilt. Durchsuche das Web nach Spar-Angeboten für '{s_term}'...", "parse_mode": "Markdown"})
                 dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
-                clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(s_term, max_results=5, stats_dict=dummy_stats), s_term, stats_dict=dummy_stats)
+                dummy_quellen = []
+                clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(s_term, dummy_quellen, max_results=5, stats_dict=dummy_stats), s_term, dummy_quellen, stats_dict=dummy_stats)
                 nachricht = f"📉 Online-Gegenanalyse für '{s_term}':\n\n" + ask_groq(chat_id, f"Günstige Web-Angebote für {s_term}", web_context=clean_context).get("antwort_text", "")
                 endkunden_preis = (ECHTE_SCRAPING_KOSTEN_PRO_RESULTAT * 50) * (1 + DEINE_PROZENTUALE_MARGE)
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=[{"text": f"💎 Premium-Suche ({endkunden_preis:.2f}€)", "callback": "premium_info"}, {"text": "🏠 Menü", "callback": "restart"}])
@@ -1252,14 +1273,15 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
             return
         else:
-            if str(chat_id) == ADMIN_USER_ID and user_input_text == "ja":
+            if str(chat_id) == str(ADMIN_USER_ID) and user_input_text == "ja":
                 nachricht = execute_final_github_update(chat_id)
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id)
             else:
                 clean_context = ""
                 if check_if_search_needed(user_input_text):
                     dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
-                    clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(user_input_text, max_results=5, stats_dict=dummy_stats), user_input_text, stats_dict=dummy_stats)
+                    dummy_quellen = []
+                    clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(user_input_text, dummy_quellen, max_results=5, stats_dict=dummy_stats), user_input_text, dummy_quellen, stats_dict=dummy_stats)
                 vollstaendiger_kontext = (medien_dossier + "\n\n" + clean_context).strip()
                 ki_frage = user_input_text if user_input_text else "Beschreibe und analysiere das Medium präzise."
                 nachricht = ask_groq(chat_id, ki_frage, web_context=vollstaendiger_kontext).get("antwort_text", "")
@@ -1297,7 +1319,7 @@ def webhook():
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
-            user_info = msg.get("from", {})  # Holt Vorname, Nachname, Username
+            user_info = msg.get("from", {})
             
             media_type, file_id, caption = None, None, msg.get("caption", "")
             if "photo" in msg:
@@ -1311,7 +1333,7 @@ def webhook():
             if raw_text or media_type:
                 clean_query = raw_text.strip() if raw_text else ""
                 
-                if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
+                if str(chat_id) == str(ADMIN_USER_ID) and has_required_prefix(clean_query):
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                     if command_part == "ja":
                         res = requests.post(
