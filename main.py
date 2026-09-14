@@ -472,12 +472,17 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         f"Nutze diese vorvalidierten Fakten als Fundament zur Beantwortung der Anfrage ('{user_query}'). "
         f"Übernehme die Status-Markierungen sowie die Quellen (Domains/Links) exakt in deine Antwort:\n\n"
     )
-
+    
     for idx, item in enumerate(processed_items[:5], 1):
+        # Python holt sich die Bild-URL, falls die Suchmaschine eine geliefert hat
+        bild_url = item.get("bild_url", "")
+        bild_zeile = f"Bild-URL: {bild_url}\n" if bild_url else "Bild-URL: Keine vorhanden\n"
+
         boss_packet += (
             f"--- Eintrag {idx} {item['status']} ---\n"
             f"Titel: {item['title']}\n"
             f"Quelle: {item['domain']} ({item['link']})\n"
+            f"{bild_zeile}"  # <--- NEU: Python rettet das Bild für die KI/Flask!
             f"Inhalt: {item['snippet']}\n\n"
         )
     return boss_packet
