@@ -1312,24 +1312,17 @@ def webhook():
             chat_id = str(cq["message"]["chat"]["id"])
             callback_data = cq["data"]
             msg_id = cq["message"]["message_id"]
-            
-            # Telegram den Erhalt des Klicks bestätigen
+
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            
-            # Wenn ein Such-Button geklickt wurde, leiten wir es direkt als Suchbegriff weiter
-            if callback_data in ["web_suche", "regio_suche"]:
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                              json={"chat_id": chat_id, "text": "🔮 Modus aktiviert. Bitte gib jetzt dein Produkt oder Thema ein:"})
-            else:
-                # Fallback für andere Buttons
-                bg_executor.submit(hintergrund_task_such_engine, chat_id, callback_data)
+            bg_executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, True)
             return {"status": "processing"}, 200
 
-        # 2. BEARBEITUNG VON TEXTNACHRICHTEN AND MEDIEN
+        # 2. BEARBEITUNG VON TEXTNACHRICHTEN UND MEDIEN
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
-            
+            user_info = msg.get("from", {})  # Holt Vorname, Nachname, Username
+
             media_type, file_id, caption = None, None, msg.get("caption", "")
             if "photo" in msg:
                 media_type = "image"
@@ -1341,7 +1334,7 @@ def webhook():
             raw_text = msg.get("text", caption)
             if raw_text or media_type:
                 clean_query = raw_text.strip() if raw_text else ""
-                
+
                 # --- GITHUB AUTOMATISCHES UPDATE (ADMIN BEFEHL) ---
                 if str(chat_id) == str(ADMIN_USER_ID) and has_required_prefix(clean_query):
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
@@ -1350,12 +1343,13 @@ def webhook():
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": "⏳ Führe GitHub Update aus...", "parse_mode": "Markdown"}
                         ).json()
-                        bg_executor.submit(hintergrund_task_such_engine, chat_id, "ja")
+                        lid = res.get("result", {}).get("message_id")
+                        bg_executor.submit(process_message_async, chat_id, "ja", lid, False, None, None, False)
                     else:
                         parts = command_part.split("\n", 1)
                         file_path = parts[0].strip() if len(parts) > 0 else "main.py"
                         new_content = parts[1] if len(parts) > 1 else command_part
-                        
+
                         res_msg = update_github_code(chat_id, file_path, new_content)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -1366,34 +1360,49 @@ def webhook():
                 # --- PRÜFUNG AUF FORMULAR-ZUSTÄNDE (Location/E-Mail) ---
                 current_state = get_user_fact(chat_id, "bot_state")
                 if current_state in ["waiting_for_location", "waiting_for_email_address"]:
-                    requests.post(
-                        f"https://api.telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    res = requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={"chat_id": chat_id, "text": "⏳ Eingabe wird verarbeitet...", "parse_mode": "Markdown"}
-                    )
-                    bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query)
+                    ).json()
+                    lid = res.get("result", {}).get("message_id")
+                    bg_executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None, False)
                     return {"status": "processing"}, 200
 
-                # --- TEXTANALYSE (SHOPPING ODER SMALLTALK) ---
+                # --- SHOPPING / SUCH-ERKENNUNG ---
+                is_shopping = False
                 lower_text = clean_query.lower()
                 for prefix in ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]:
                     if lower_text.startswith(prefix):
                         clean_query = clean_query[len(prefix):].strip()
+                        is_shopping = True
                         break
-                
-                # Wenn es ein Shopping-Inhalt oder eine normale Textnachricht ist:
-                # Wir schicken die Sanduhr ab
-                requests.post(
+
+                if "zoll" in lower_text or "radkappen" in lower_text:
+                    is_shopping = True
+
+                # --- VERARBEITUNG & SANDUHR-SENDUNG ---
+                res = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
-                )
-                
-                # KORREKTUR: Jede Text- und Suchanfrage geht direkt an deine neue Engine!
-                bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query)
-                return {"status": "processing"}, 200
+                ).json()
+                lid = res.get("result", {}).get("message_id")
+
+                if lid:
+                    bg_executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
+                else:
+                    bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query, user_info)
+
+            return {"status": "processing"}, 200
 
     except Exception as e:
         print(f"Webhook error: {e}", flush=True)
     return {"status": "error"}, 200
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "Bot is alive!", 200
+
 
 
 
