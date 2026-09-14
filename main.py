@@ -1305,6 +1305,7 @@ def webhook():
         if not data:
             return {"status": "ignored"}, 200
 
+        # 1. BEARBEITUNG VON BUTTON-KLICKS (Inline Keyboards)
         if "callback_query" in data:
             cq = data["callback_query"]
             cq_id = cq["id"]
@@ -1312,14 +1313,22 @@ def webhook():
             callback_data = cq["data"]
             msg_id = cq["message"]["message_id"]
             
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            bg_executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, True)
+            # Telegram den Erhalt des Klicks bestätigen
+            requests.post(f"https://telegram.org{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
+            
+            # Wenn ein Such-Button geklickt wurde, leiten wir es direkt als Suchbegriff weiter
+            if callback_data in ["web_suche", "regio_suche"]:
+                requests.post(f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                              json={"chat_id": chat_id, "text": "🔮 Modus aktiviert. Bitte gib jetzt dein Produkt oder Thema ein:"})
+            else:
+                # Fallback für andere Buttons
+                bg_executor.submit(hintergrund_task_such_engine, chat_id, callback_data)
             return {"status": "processing"}, 200
 
+        # 2. BEARBEITUNG VON TEXTNACHRICHTEN AND MEDIEN
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
-            user_info = msg.get("from", {})
             
             media_type, file_id, caption = None, None, msg.get("caption", "")
             if "photo" in msg:
@@ -1333,15 +1342,15 @@ def webhook():
             if raw_text or media_type:
                 clean_query = raw_text.strip() if raw_text else ""
                 
+                # --- GITHUB AUTOMATISCHES UPDATE (ADMIN BEFEHL) ---
                 if str(chat_id) == str(ADMIN_USER_ID) and has_required_prefix(clean_query):
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                     if command_part == "ja":
                         res = requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": "⏳ Führe GitHub Update aus...", "parse_mode": "Markdown"}
                         ).json()
-                        lid = res.get("result", {}).get("message_id")
-                        bg_executor.submit(process_message_async, chat_id, "ja", lid, False, None, None, False)
+                        bg_executor.submit(hintergrund_task_such_engine, chat_id, "ja")
                     else:
                         parts = command_part.split("\n", 1)
                         file_path = parts[0].strip() if len(parts) > 0 else "main.py"
@@ -1349,52 +1358,43 @@ def webhook():
                         
                         res_msg = update_github_code(chat_id, file_path, new_content)
                         requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": res_msg, "parse_mode": "Markdown"}
                         )
                     return {"status": "processing"}, 200
 
+                # --- PRÜFUNG AUF FORMULAR-ZUSTÄNDE (Location/E-Mail) ---
                 current_state = get_user_fact(chat_id, "bot_state")
                 if current_state in ["waiting_for_location", "waiting_for_email_address"]:
-                    res = requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    requests.post(
+                        f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={"chat_id": chat_id, "text": "⏳ Eingabe wird verarbeitet...", "parse_mode": "Markdown"}
-                    ).json()
-                    lid = res.get("result", {}).get("message_id")
-                    bg_executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None, False)
+                    )
+                    bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query)
                     return {"status": "processing"}, 200
 
-                is_shopping = False
+                # --- TEXTANALYSE (SHOPPING ODER SMALLTALK) ---
                 lower_text = clean_query.lower()
                 for prefix in ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]:
                     if lower_text.startswith(prefix):
                         clean_query = clean_query[len(prefix):].strip()
-                        is_shopping = True
                         break
                 
-                if "zoll" in lower_text or "radkappen" in lower_text:
-                    is_shopping = True
-
-                if is_shopping:
-                    res = requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
-                    ).json()
-                    lid = res.get("result", {}).get("message_id")
-                    if lid:
-                        bg_executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
-                else:
-                    bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query, user_info)
+                # Wenn es ein Shopping-Inhalt oder eine normale Textnachricht ist:
+                # Wir schicken die Sanduhr ab
+                requests.post(
+                    f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
+                )
                 
+                # KORREKTUR: Jede Text- und Suchanfrage geht direkt an deine neue Engine!
+                bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query)
                 return {"status": "processing"}, 200
 
     except Exception as e:
         print(f"Webhook error: {e}", flush=True)
     return {"status": "error"}, 200
 
-@app.route("/ping", methods=["GET"])
-def ping():
-    return "Bot is alive!", 200
 
 
 # =====================================================================
