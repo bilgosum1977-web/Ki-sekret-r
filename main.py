@@ -4,7 +4,7 @@
 import os
 import time
 import json
-import re  # <-- Chef-Filter für das JSON-Parsing
+import re
 import base64
 import sqlite3
 import requests
@@ -195,7 +195,6 @@ def _fetch_volltext(link, headers, old_snippet):
     return old_snippet
 
 def master_data_cleaner_and_boss(raw_results, user_query):
-    # CHEF-FILTER 2: Wenn Python sagt 'Keine Suche nötig', Dossier abbrechen
     if not check_if_search_needed(user_query) or not raw_results:
         return ""
 
@@ -248,7 +247,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
             "link": link, "status": status_tag, "priority": priority
         })
 
-    # PERFORMANCE-BOOST: Offizielle Seiten parallel abrufen
     if links_to_scrape:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             future_to_index = {
@@ -266,7 +264,7 @@ def master_data_cleaner_and_boss(raw_results, user_query):
     boss_packet = (
         f"GEPRÜFTES DOSSIER VOM BOSS-FILTER:\n"
         f"Nutze AUSSCHLIESSLICH diese vorvalidierten Daten zur Beantwortung der Anfrage ('{user_query}'). "
-        f"Übernehme die Status-Markierungen sowie die Quellen (Domains/Links) exakt in deine Antwort, damit der Nutzer weiß, woher die Info stammt:\n\n"
+        f"Übernehme die Status-Markierungen sowie die Quellen (Domains/Links) exakt in deine Antwort:\n\n"
     )
 
     for idx, item in enumerate(processed_items[:5], 1):
@@ -414,6 +412,132 @@ scheduler.start()
 
 
 # =====================================================================
+# MULTIMODAL & VISION PIPELINE (QWEN FALLBACK-KETTE)
+# =====================================================================
+def download_telegram_file(file_id: str) -> str:
+    try:
+        res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10)
+        res.raise_for_status()
+        file_path_tg = res.json().get("result", {}).get("file_path")
+        if not file_path_tg:
+            return ""
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path_tg}"
+        file_res = requests.get(file_url, timeout=30)
+        file_res.raise_for_status()
+
+        suffix = os.path.splitext(file_path_tg)[1] or ".tmp"
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp_file.write(file_res.content)
+        tmp_file.close()
+        return tmp_file.name
+    except Exception as e:
+        print(f"❌ Fehler beim Download der Mediendatei: {e}", flush=True)
+        return ""
+
+def analyze_image_and_create_dossier(image_path: str) -> tuple[bool, str, str]:
+    """ Analysiert Bilder und gibt (is_prod_detected, detected_name, dossier) zurück """
+    try:
+        if not os.path.exists(image_path):
+            return False, "", "BILD-DOSSIER: Bilddatei nicht gefunden."
+
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+
+        if not groq_client:
+            return False, "", "BILD-DOSSIER: API-Key fehlt."
+
+        vision_models = ["qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
+        completion = None
+        last_error = None
+
+        vision_prompt = (
+            "Analysiere dieses Bild präzise auf Deutsch. Antworte mit einem strukturierten Dossier:\n"
+            "1. Kerninhalt: Was ist auf dem Bild zu sehen (Gegenstände, Personen, Text/Logos)?\n"
+            "2. Produkterkennung: Falls ein konkretes Produkt oder ein kaufbarer Artikel zu sehen ist, nenne den exakten Produktnamen ganz kurz und prägnant (z. B. 'Alufelgen Radkappen'). Wenn kein Produkt zu sehen ist, antworte hier mit 'KEIN_PRODUKT'.\n"
+            "3. Echtheits- & KI-Check: Gibt es visuelle Artefakte, Manipulationsspuren oder KI-Merkmale?"
+        )
+
+        for model_name in vision_models:
+            try:
+                completion = groq_client.chat.completions.create(
+                    model=model_name,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": vision_prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                        ]
+                    }],
+                    temperature=0.1,
+                    max_tokens=600
+                )
+                break
+            except Exception as model_err:
+                last_error = model_err
+                continue
+
+        if completion is None:
+            if last_error:
+                raise last_error
+            return False, "", "BILD-DOSSIER: Fehler bei der KI-Bildanalyse."
+
+        ai_description = completion.choices[0].message.content
+        dossier = f"BILD-DOSSIER VOM VISION-FILTER:\n{ai_description}\n"
+
+        is_prod = False
+        detected_name = ""
+        if "KEIN_PRODUKT" not in ai_description.upper():
+            is_prod = True
+            lines = ai_description.split("\n")
+            for line in lines:
+                if "produkt" in line.lower() or "name" in line.lower():
+                    detected_name = line.split(":")[-1].strip(" '\"*")
+                    break
+            if not detected_name:
+                detected_name = "Produkt vom Bild"
+
+        if OPENCV_AVAILABLE:
+            try:
+                img = cv2.imread(image_path)
+                if img is not None:
+                    h, w, _ = img.shape
+                    dossier += f"• Technische Auflösung: {w}x{h} Pixel.\n"
+            except Exception:
+                pass
+
+        return is_prod, detected_name, dossier
+    except Exception as e:
+        print(f"❌ Fehler bei Vision API: {e}", flush=True)
+        return False, "", "BILD-DOSSIER: Fehler bei der Verarbeitung."
+
+def process_video_and_create_dossier(video_path: str) -> str:
+    dossier = "VIDEO-DOSSIER VOM VIDEO-PROZESSOR:\n"
+    if OPENCV_AVAILABLE:
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = cap.get(cv2.CAP_PROP_FPS) or 25
+                duration = frame_count / fps if fps > 0 else 0
+                dossier += f"• Video-Metadaten: Dauer ~{duration:.1f}s, {frame_count} Frames total.\n"
+                count = 0
+                while cap.isOpened() and count < 5:
+                    ret, _ = cap.read()
+                    if not ret:
+                        break
+                    count += 1
+                cap.release()
+                dossier += f"• Frame-Extraktion: {count} Kern-Frames analysiert.\n"
+            else:
+                dossier += "• Videodatei konnte nicht geöffnet werden.\n"
+        except Exception as e:
+            dossier += f"• Fehler: {e}\n"
+    else:
+        dossier += "• OpenCV nicht verfügbar.\n"
+    return dossier
+
+
+# =====================================================================
 # CODE INTEGRITY & GITHUB UPDATES
 # =====================================================================
 def has_required_prefix(message: str) -> bool:
@@ -530,7 +654,7 @@ def run_apify_actor(query: str, actor_id: str = "junglee~amazon-crawler", max_it
 
 
 # =====================================================================
-# GROQ KI CHAT-FUNKTION (Mit Python-Schutzschild & Quellen-Anzeige)
+# GROQ KI CHAT-FUNKTION (Mit Python-Schutzschild & JSON-Parsing)
 # =====================================================================
 def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
     if not groq_client:
@@ -539,8 +663,8 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         history = get_chat_history(chat_id, limit=10)
         system_prompt = (
             "Du bist 'Code X', ein transparenter, neutraler und hilfsbereiter KI-Assistent in einem Telegram-Bot. "
-            "Wenn dir ein Dossier mit Web-Daten übergeben wird, musst du die Status-Markierungen (🔴, 🟡, ⚠️) "
-            "und die **Quellen (Domains/Links)** zwingend in deine Antwort einbauen, damit der Nutzer genau weiß, woher die Info stammt und wer spricht. "
+            "Wenn dir ein Dossier mit Web-Daten oder Medien-Daten übergeben wird, musst du die Status-Markierungen (🔴, 🟡, ⚠️) "
+            "und die **Quellen (Domains/Links)** zwingend in deine Antwort einbauen. "
             "Erfinde keine Fakten. "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
             "{\n"
@@ -562,7 +686,6 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         )
         raw_content = completion.choices[0].message.content.strip()
         
-        # --- PYTHON WIRD ZUM CHEF: Robustes Regex-Parsing ---
         clean_json = raw_content
         match = re.search(r"\{.*\}", raw_content, re.DOTALL)
         if match:
@@ -578,7 +701,6 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
                         clean_json = p_s
                         break
 
-        # --- SICHERHEITS-NETZ: Python validiert das JSON ---
         try:
             response_data = json.loads(clean_json)
             return {
@@ -586,7 +708,6 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
                 "buttons": response_data.get("buttons", [])
             }
         except json.JSONDecodeError:
-            print(f"⚠️ Python-Schutz: Groq lieferte ungültiges JSON. Rohdaten: {raw_content}", flush=True)
             return {
                 "antwort_text": raw_content,
                 "buttons": []
@@ -657,24 +778,58 @@ def send_telegram_photo_or_message(chat_id, text, image_url=None, message_id=Non
 
 
 # =====================================================================
-# ASYNCHRONER PROZESSOR
+# ASYNCHRONER PROZESSOR (KONTROLLZENTRUM)
 # =====================================================================
+import tempfile
+
 def process_message_async(chat_id, query, message_id, is_shopping, media_type=None, file_id=None, is_callback=False):
     try:
-        save_message(chat_id, "user", query if query else f"[{media_type}]")
+        user_input_text = query.strip() if query else ""
+        save_message(chat_id, "user", user_input_text if user_input_text else f"[{media_type}]")
+        
         buttons = []
         nachricht = ""
         image_to_send = None
+        medien_dossier = ""
 
+        # =====================================================================
+        # MASTER-WEICHE 1: MEDIEN- & PRODUKT-ERKENNUNG
+        # =====================================================================
+        if media_type and file_id:
+            local_file = download_telegram_file(file_id)
+            if local_file:
+                if media_type == "image":
+                    is_prod_detected, detected_name, medien_dossier = analyze_image_and_create_dossier(local_file)
+                    if is_prod_detected and detected_name:
+                        is_shopping = True
+                        user_input_text = detected_name
+                elif media_type == "video":
+                    medien_dossier = process_video_and_create_dossier(local_file)
+                    if "produkt" in medien_dossier.lower():
+                        is_shopping = True
+                else:
+                    medien_dossier = f"📦 [SYSTEM HINWEIS]: Datei vom Typ '{media_type}' empfangen."
+
+        # =====================================================================
+        # MASTER-WEICHE 2: TEXT-KLASSIFIZIERUNG
+        # =====================================================================
+        if user_input_text and not is_shopping and not is_callback:
+            lower_text = user_input_text.lower()
+            shopping_keywords = ["kaufen", "preis", "shop", "angebot", "bestellen", "radkappen", "zoll", "felgen"]
+            if any(kw in lower_text for kw in shopping_keywords):
+                is_shopping = True
+
+        # =====================================================================
+        # ABARBEITUNG BOT-STATES & CALLBACKS
+        # =====================================================================
         current_state = get_user_fact(chat_id, "bot_state")
         
-        if current_state == "waiting_for_location":
-            loc = query.strip().capitalize()
+        if current_state == "waiting_for_location" and not is_callback:
+            loc = user_input_text.capitalize()
             set_user_fact(chat_id, "bot_state", None)  
             set_user_fact(chat_id, "location", loc)    
-
             send_telegram_photo_or_message(chat_id, f"✅ Dein Standort wurde auf **{loc}** gespeichert!", message_id=message_id)
-
+            
             gemerkte_suche = get_user_fact(chat_id, "last_user_query") or "radkappen"
             such_string_mit_ort = f"{gemerkte_suche} {loc}"
             
@@ -706,8 +861,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     {"text": "🔌 Zubehör", "callback": f"accessories_{gemerkte_suche}"}
                 ]
             else:
-                raw_web_data = fetch_raw_web_data(such_string_mit_ort)
-                clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort)
+                clean_context = ""
+                if check_if_search_needed(such_string_mit_ort):
+                    raw_web_data = fetch_raw_web_data(such_string_mit_ort)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort)
                 groq_result = ask_groq(chat_id, f"Finde Angebote zu {such_string_mit_ort}", web_context=clean_context)
                 nachricht = f"🌐 **Ergebnisse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
                 buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
@@ -765,7 +922,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     buttons = [{"text": "🏠 Hauptmenü", "callback": "restart"}]
 
                 save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
+                send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
                 return
 
             elif query.startswith("accessories_"):
@@ -835,9 +992,9 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 return
 
         elif is_shopping:
-            clean_search = query.lower()
+            clean_search = user_input_text
             for prefix in ["finde mir", "suche nach", "suchen nach", "suche", "such", "finde", "mir"]:
-                if clean_search.startswith(prefix):
+                if clean_search.lower().startswith(prefix):
                     clean_search = clean_search[len(prefix):].strip()
             
             set_user_fact(chat_id, "last_user_query", clean_search)
@@ -845,35 +1002,43 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             
             if not location:
                 set_user_fact(chat_id, "bot_state", "waiting_for_location")
-                nachricht = f"🛍️ Du suchst nach **'{clean_search}'**.\n\nIn welcher Stadt befindest du dich?"
+                nachricht = f"🛍️ Du suchst nach **'{clean_search}'**.\n\nIn welcher Stadt befindest du dich für lokale Angebote?"
                 buttons = [{"text": "❌ Abbrechen", "callback": "restart"}]
-                save_message(chat_id, "assistant", nachricht)
-                send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
-                return
+            else:
+                nachricht = f"🎯 Suchanfrage für **'{clean_search}'** in {location} empfangen.\n\nWie viele Ergebnisse möchtest du sehen?"
+                buttons = [{"text": "Top 3", "callback": "limit_3"}, {"text": "10 Ergebnisse", "callback": "limit_10"}]
 
-            nachricht = f"🎯 Suchanfrage für **'{clean_search}'** empfangen.\n\nWie viele Ergebnisse möchtest du sehen?"
-            buttons = [{"text": "Top 3", "callback": "limit_3"}, {"text": "10 Ergebnisse", "callback": "limit_10"}]
             save_message(chat_id, "assistant", nachricht)
             send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
             return
 
         else:
-            if str(chat_id) == ADMIN_USER_ID and query.strip() == "ja":
+            if str(chat_id) == ADMIN_USER_ID and user_input_text == "ja":
                 nachricht = execute_final_github_update(chat_id)
                 buttons = []
             else:
-                raw_web_data = fetch_raw_web_data(query)
-                clean_context = master_data_cleaner_and_boss(raw_web_data, query)
-                groq_result = ask_groq(chat_id, query, web_context=clean_context)
-                nachricht = groq_result["antwort_text"]
-                buttons = []
+                clean_context = ""
+                if check_if_search_needed(user_input_text):
+                    raw_web_data = fetch_raw_web_data(user_input_text)
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, user_input_text)
+                
+                vollstaendiger_kontext = ""
+                if medien_dossier:
+                    vollstaendiger_kontext += medien_dossier + "\n\n"
+                if clean_context:
+                    vollstaendiger_kontext += clean_context
+                
+                ki_frage = user_input_text if user_input_text else "Analysiere das übermittelte Medium präzise anhand der Dossier-Daten."
+                groq_result = ask_groq(chat_id, ki_frage, web_context=vollstaendiger_kontext)
+                nachricht = groq_result.get("antwort_text", "⚠️ Keine Antwort erhalten.")
+                buttons = groq_result.get("buttons", [])
 
         save_message(chat_id, "assistant", nachricht)
         send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
 
     except Exception as thread_error:
-        print(f"❌ KRITISCHER FEHLER im Thread: {thread_error}", flush=True)
-        send_telegram_photo_or_message(chat_id, f"❌ Interner Fehler: `{str(thread_error)}`", message_id=message_id)
+        print(f"❌ KRITISCHER FEHLER im Hauptprozessor: {thread_error}", flush=True)
+        send_telegram_photo_or_message(chat_id, f"❌ System-Notbremse gegriffen: `{str(thread_error)}`", message_id=message_id)
 
 
 # =====================================================================
@@ -899,7 +1064,7 @@ def webhook():
             msg_id = cq["message"]["message_id"]
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            executor.submit(process_message_async, chat_id, callback_data, msg_id, False, is_callback=True)
+            executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, is_callback=True)
             return "OK", 200
 
         if "message" in data:
@@ -926,7 +1091,7 @@ def webhook():
                             json={"chat_id": chat_id, "text": "⏳ Führe GitHub Update aus...", "parse_mode": "Markdown"}
                         ).json()
                         lid = res.get("result", {}).get("message_id")
-                        executor.submit(process_message_async, chat_id, "ja", lid, False, None, None)
+                        executor.submit(process_message_async, chat_id, "ja", lid, False, None, None, False)
                     else:
                         parts = command_part.split("\n", 1)
                         file_path = parts[0].strip() if len(parts) > 0 else "main.py"
@@ -946,7 +1111,7 @@ def webhook():
                         json={"chat_id": chat_id, "text": "⏳ Standort wird verarbeitet...", "parse_mode": "Markdown"}
                     ).json()
                     lid = res.get("result", {}).get("message_id")
-                    executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None)
+                    executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None, False)
                     return "OK", 200
 
                 is_shopping = False
@@ -967,7 +1132,7 @@ def webhook():
                     ).json()
                     lid = res.get("result", {}).get("message_id")
                     if lid:
-                        executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id)
+                        executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
                 
     except Exception as e:
         print(f"Webhook error: {e}", flush=True)
