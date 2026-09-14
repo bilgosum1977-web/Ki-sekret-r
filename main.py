@@ -958,11 +958,13 @@ def frage_groq_mit_boss_dossier(boss_packet, user_query):
     res = ask_groq("admin_proxy_eval", user_query, web_context=boss_packet)
     return res.get("antwort_text", "Keine Antwort generiert.")
 
-def hintergrund_task_such_engine(chat_id, user_query, user_info):
+def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
     """Verarbeitet die Suche, prüft auf Smalltalk und leitet Statistiken an den Admin"""
     try:
         genutzte_quellen = []
         
+        if user_info is None:
+            user_info = {}
         username = user_info.get("username", "Kein Username")
         first_name = user_info.get("first_name", "Unbekannt")
         admin_start_msg = (
@@ -978,7 +980,19 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
         if user_query.lower().strip() in smalltalk_words or len(user_query) < 4:
             print(f"[Chef] Smalltalk erkannt: '{user_query}'. Überspringe Websuche.", flush=True)
             
-            system_prompt = "Du bist ein freundlicher KI-Assistent namens Ki-Sekretär. Begrüße den Nutzer knapp und frage, wie du ihm bei einer Produktsuche oder einem Faktencheck helfen kannst."
+            if str(chat_id) == str(ADMIN_USER_ID):
+                system_prompt = (
+                    "Du bist die künstliche Intelligenz Groq (Modell: Llama-3-8b). "
+                    "Begrüße den Admin freundlich per 'Du' und erwähne direkt im ersten Satz, dass du Groq bist. "
+                    "Frage knapp, wie du bei einer Produktsuche helfen kannst."
+                )
+            else:
+                system_prompt = (
+                    "Du bist ein freundlicher, anonymer KI-Assistent namens Ki-Sekretär. "
+                    "Begrüße den Nutzer knapp und höflich per 'Du'. "
+                    "Frage ihn, wie du ihm bei einer Produktsuche oder einem Faktencheck helfen kannst."
+                )
+
             completion = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=[
@@ -996,12 +1010,22 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info):
             return
 
         # === ECHTE SUCHEN & TRIANGULATION ===
+        gespeicherte_stadt = get_user_fact(chat_id, "user_city")
+        if gespeicherte_stadt:
+            print(f"[Chef] Gespeicherte Heimatstadt gefunden: {gespeicherte_stadt}. Ergänze Suchanfrage.", flush=True)
+            if gespeicherte_stadt.lower() not in user_query.lower():
+                user_query = f"{user_query} {gespeicherte_stadt}"
+
         print(f"[Chef] Echte Suchanfrage erkannt: {user_query}. Starte Triangulation...", flush=True)
         quellen_statistik = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
         
         raw_data = fetch_raw_web_data_with_stats(user_query, genutzte_quellen, max_results=5, stats_dict=quellen_statistik)
         boss_packet = master_data_cleaner_and_boss(raw_data, user_query, genutzte_quellen, stats_dict=quellen_statistik)
         
+        if quellen_statistik["DuckDuckGo"] > 0 and "🦆 DuckDuckGo" not in genutzte_quellen: genutzte_quellen.append("🦆 DuckDuckGo")
+        if quellen_statistik["SearXNG"] > 0 and "🔍 SearXNG" not in genutzte_quellen: genutzte_quellen.append("🔍 SearXNG")
+        if quellen_statistik["BeautifulSoup_DeepScrape"] > 0 and "🥣 Beautiful Soup" not in genutzte_quellen: genutzte_quellen.append("🥣 Beautiful Soup")
+
         admin_data_msg = (
             f"📊 **System-Datenabruf für:** `{user_query}`\n"
             f"➔ DuckDuckGo Treffer: {quellen_statistik['DuckDuckGo']}\n"
@@ -1314,6 +1338,30 @@ def webhook():
             msg_id = cq["message"]["message_id"]
 
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
+            
+            # 🔴 NEU: ABSPRACHE-AUSWERTUNG (JA / NEIN BUTTONS)
+            if callback_data.startswith("save_loc_ja:"):
+                stadt_to_save = callback_data.split(":", 1)[1]
+                set_user_fact(chat_id, "user_city", stadt_to_save)
+                set_user_fact(chat_id, "bot_state", "normal")
+                
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                              json={"chat_id": chat_id, "text": f"✅ Alles klar! Ich habe **{stadt_to_save}** als deine Heimatstadt gespeichert und merke mir das für die Zukunft.", "parse_mode": "Markdown"})
+                
+                bg_executor.submit(hintergrund_task_such_engine, chat_id, stadt_to_save)
+                return {"status": "processing"}, 200
+                
+            elif callback_data == "save_loc_nein":
+                temp_stadt = get_user_fact(chat_id, "temp_location_input")
+                set_user_fact(chat_id, "bot_state", "normal")
+                
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                              json={"chat_id": chat_id, "text": "❌ Stadt nicht gespeichert. Ich verarbeite die Suche nur für dieses eine Mal.", "parse_mode": "Markdown"})
+                
+                if temp_stadt:
+                    bg_executor.submit(hintergrund_task_such_engine, chat_id, temp_stadt)
+                return {"status": "processing"}, 200
+
             bg_executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, True)
             return {"status": "processing"}, 200
 
@@ -1321,7 +1369,7 @@ def webhook():
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
-            user_info = msg.get("from", {})  # Holt Vorname, Nachname, Username
+            user_info = msg.get("from", {})
 
             media_type, file_id, caption = None, None, msg.get("caption", "")
             if "photo" in msg:
@@ -1359,7 +1407,30 @@ def webhook():
 
                 # --- PRÜFUNG AUF FORMULAR-ZUSTÄNDE (Location/E-Mail) ---
                 current_state = get_user_fact(chat_id, "bot_state")
-                if current_state in ["waiting_for_location", "waiting_for_email_address"]:
+                if current_state == "waiting_for_location":
+                    set_user_fact(chat_id, "temp_location_input", clean_query)
+                    
+                    absprache_buttons = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "✅ Ja, speichern", "callback_data": f"save_loc_ja:{clean_query}"},
+                                {"text": "❌ Nein", "callback_data": "save_loc_nein"}
+                            ]
+                        ]
+                    }
+                    
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id, 
+                            "text": f"Ich habe **{clean_query}** als deinen Standort registriert.\n\nMöchtest du, dass ich diese Stadt dauerhaft für deine zukünftigen Suchen speichere, damit du sie nicht mehr eingeben musst?", 
+                            "parse_mode": "Markdown",
+                            "reply_markup": absprache_buttons
+                        }
+                    )
+                    return {"status": "processing"}, 200
+
+                elif current_state == "waiting_for_email_address":
                     res = requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={"chat_id": chat_id, "text": "⏳ Eingabe wird verarbeitet...", "parse_mode": "Markdown"}
@@ -1402,8 +1473,6 @@ def webhook():
 @app.route("/ping", methods=["GET"])
 def ping():
     return "Bot is alive!", 200
-
-
 
 
 # =====================================================================
