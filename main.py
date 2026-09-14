@@ -52,7 +52,7 @@ ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "8874543115")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", ADMIN_USER_ID)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_KEY")
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "https://ki-sekret-r.onrender.com/search")
 
 REQUIRED_PREFIX = os.getenv("REQUIRED_PREFIX", "+×÷edi99")
 DB_PATH = os.getenv("DB_PATH", "bot_memory.db")
