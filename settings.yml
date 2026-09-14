@@ -1,0 +1,36 @@
+use_default_settings: true
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "changeme"
+  base_url: "https://example.com"
+
+search:
+  safe_search: 0
+  autocomplete: "duckduckgo"
+  default_lang: "de"
+  formats:
+    - html
+    - json
+
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: false
+
+  - name: bing
+    engine: bing
+    disabled: true
+
+  - name: google
+    engine: google
+    disabled: true
+
+  - name: wikipedia
+    engine: wikipedia
+    disabled: false
+
+ui:
+  static_path: "/usr/local/searxng/searx/static"
+  templates_path: "/usr/local/searxng/searx/templates"
