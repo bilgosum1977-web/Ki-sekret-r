@@ -73,6 +73,9 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "dein_sicheres_passwort")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.deinprovider.de")
 IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
 
+# --- GLOBALER HINTERGRUND EXECUTOR ---
+bg_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
 
 # =====================================================================
 # DATENBANK & HILFSFUNKTIONEN (Chat History, User Facts & KI-Gedächtnis)
@@ -263,12 +266,12 @@ def check_incoming_emails_and_forward():
     except Exception as e:
         print(f"❌ IMAP-Fehler beim Postfach-Check: {e}")
 
-def fetch_raw_web_data(query):
+def fetch_raw_web_data(query, max_results=5):
     results = []
     if DDGS is not None:
         try:
             with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=5):
+                for r in ddgs.text(query, max_results=max_results):
                     results.append({
                         "title": r.get("title", ""),
                         "snippet": r.get("body", ""),
@@ -282,7 +285,7 @@ def fetch_raw_web_data(query):
             res = requests.get(f"{SEARXNG_URL}/search", params={"q": query, "format": "json"}, timeout=5)
             if res.status_code == 200:
                 data = res.json()
-                for r in data.get("results", [])[:5]:
+                for r in data.get("results", [])[:max_results]:
                     results.append({
                         "title": r.get("title", ""),
                         "snippet": r.get("content", ""),
@@ -294,7 +297,7 @@ def fetch_raw_web_data(query):
 
 
 # =====================================================================
-# ENGINES KOPPLUNG: BOSS-FILTER + PYTHON SMALLTALK PROTECTION
+# ENGINES KOPPLUNG: BOSS-FILTER + BEAUTIFUL SOUP DEEP SCRAPING
 # =====================================================================
 TRUSTED_AUTHORITIES = {
     "apple.com", "microsoft.com", "reuters.com", "bloomberg.com", 
@@ -314,19 +317,18 @@ def check_if_search_needed(query: str) -> bool:
         return False
     return True
 
-def _fetch_volltext(link, headers, old_snippet):
+def hole_seite_einzeln(link, headers):
+    """Hilfsfunktion: Lädt eine einzelne Seite und bereinigt sie mit Beautiful Soup."""
     try:
-        res = requests.get(link, headers=headers, timeout=2.5)
+        res = requests.get(link, headers=headers, timeout=3)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
                 script.decompose()
-            volltext = " ".join(soup.get_text().split())
-            if len(volltext) > len(old_snippet):
-                return volltext[:2500] + "... [Volltext via Beautiful Soup extrahiert]"
+            return " ".join(soup.get_text().split())[:2000]
     except Exception:
         pass
-    return old_snippet
+    return None
 
 def master_data_cleaner_and_boss(raw_results, user_query):
     if not check_if_search_needed(user_query) or not raw_results:
@@ -336,7 +338,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
     seen_titles = set()
     processed_items = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    links_to_scrape = []
 
     for item in raw_results:
         title = item.get("title", "").strip()
@@ -368,7 +369,6 @@ def master_data_cleaner_and_boss(raw_results, user_query):
         if is_official:
             status_tag = "🔴 [OFFIZIELLER FAKT]"
             priority = 3
-            links_to_scrape.append((link, len(processed_items)))
         elif is_rumor:
             status_tag = "⚠️ [UNBESTÄTIGTES GERÜCHT]"
             priority = 1
@@ -381,15 +381,25 @@ def master_data_cleaner_and_boss(raw_results, user_query):
             "link": link, "status": status_tag, "priority": priority
         })
 
-    if links_to_scrape:
+    # Wir sammeln alle offiziellen Links (Priorität 3), die wir tief scannen wollen
+    offizielle_links = [item["link"] for item in processed_items if item["priority"] == 3]
+
+    if offizielle_links:
+        print("[Chef-Order] Starte paralleles Beautiful Soup Scraping...", flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_index = {
-                executor.submit(_fetch_volltext, link, headers, processed_items[idx]["snippet"]): idx 
-                for link, idx in links_to_scrape
-            }
-            for future in concurrent.futures.as_completed(future_to_index):
-                idx = future_to_index[future]
-                processed_items[idx]["snippet"] = future.result()
+            future_to_link = {executor.submit(hole_seite_einzeln, link, headers): link for link in offizielle_links[:3]}
+            try:
+                for future in concurrent.futures.as_completed(future_to_link, timeout=10):
+                    link = future_to_link[future]
+                    tiefen_text = future.result()
+                    
+                    if tiefen_text:
+                        for item in processed_items:
+                            if item["link"] == link:
+                                item["snippet"] = tiefen_text + "... [Volltext-Upgrade via Beautiful Soup]"
+                                print(f"[Erfolg] Deep-Scraping beendet für: {item['domain']}", flush=True)
+            except concurrent.futures.TimeoutError:
+                print("⚠️ [Zeitlimit erreicht] Deep-Scraping dauerte länger als 10 Sekunden. Breche ab für schnelle Bot-Antwort!", flush=True)
 
     processed_items.sort(key=lambda x: x["priority"], reverse=True)
     if not processed_items:
@@ -937,7 +947,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
     try:
         user_input_text = query.strip() if query else ""
         
-        # Psychologische Mustererkennung triggern
         if user_input_text and not is_callback:
             analyze_and_update_user_pattern(chat_id, user_input_text)
 
@@ -948,7 +957,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         image_to_send = None
         medien_dossier = ""
 
-        # --- MULTIMODALE WEICHE ---
         if media_type and file_id:
             local_file = download_telegram_file(file_id)
             if local_file:
@@ -960,7 +968,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 elif media_type == "video":
                     medien_dossier = process_video_and_create_dossier(local_file)
 
-        # --- TEXT-KLASSIFIZIERUNG (Automatische Shopping-Erkennung) ---
         if user_input_text and not is_shopping and not is_callback:
             lower_text = user_input_text.lower()
             shopping_keywords = ["kaufen", "preis", "shop", "angebot", "bestellen", "radkappen", "zoll", "felgen"]
@@ -969,9 +976,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
         current_state = get_user_fact(chat_id, "bot_state")
         
-        # =====================================================================
-        # STATE: WARTET AUF E-MAIL ADRESSE (ABSPRACHE-PROZESS)
-        # =====================================================================
         if current_state == "waiting_for_email_address" and not is_callback:
             target_email = user_input_text
             set_user_fact(chat_id, "bot_state", None)
@@ -991,9 +995,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=[{"text": "🏠 Hauptmenü", "callback": "restart"}])
             return
 
-        # =====================================================================
-        # STATE: WARTET AUF STADT (REGIONALER FREEMIUM-BLOCK)
-        # =====================================================================
         if current_state == "waiting_for_location" and not is_callback:
             loc = user_input_text.capitalize()
             set_user_fact(chat_id, "bot_state", None)  
@@ -1053,9 +1054,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, buttons=buttons)
             return
 
-        # =====================================================================
-        # CALLBACK-ABARBEITUNG (INTERAKTIVE ABSPRACHEN)
-        # =====================================================================
         if is_callback:
             if query.startswith("limit_"):
                 parts = query.split("_")
@@ -1182,9 +1180,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! Was kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "search_mode_regional"}])
                 return
 
-        # =====================================================================
-        # HAUPTROUTEN-WEICHE FÜR TEXT-EINGABEN
-        # =====================================================================
         if is_shopping:
             clean_search = user_input_text
             set_user_fact(chat_id, "last_user_query", clean_search)
@@ -1193,7 +1188,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
             return
         else:
-            # Normaler Chat / Admin-Update
             if str(chat_id) == ADMIN_USER_ID and user_input_text == "ja":
                 nachricht = execute_final_github_update(chat_id)
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id)
@@ -1212,10 +1206,8 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
 
 # =====================================================================
-# FLASK WEBHOOK (DIE EMPFANGS-SCHALTZENTRALE)
+# FLASK WEBHOOK (DIE NON-BLOCKING EMPFANGS-SCHALTZENTRALE)
 # =====================================================================
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-
 @app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
 def webhook():
     if request.method == "GET":
@@ -1224,9 +1216,8 @@ def webhook():
     try:
         data = request.get_json()
         if not data:
-            return "OK", 200
+            return {"status": "ignored"}, 200
 
-        # --- A: CALLBACK BOTTONS ABFANGEN ---
         if "callback_query" in data:
             cq = data["callback_query"]
             cq_id = cq["id"]
@@ -1235,10 +1226,9 @@ def webhook():
             msg_id = cq["message"]["message_id"]
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
-            executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, True)
-            return "OK", 200
+            bg_executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, True)
+            return {"status": "processing"}, 200
 
-        # --- B: NORMALE CHAT-NACHRICHTEN / MEDIEN ABFANGEN ---
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
@@ -1255,7 +1245,6 @@ def webhook():
             if raw_text or media_type:
                 clean_query = raw_text.strip() if raw_text else ""
                 
-                # ADMIN-SCHEIDE: GitHub Live-Patcher ausführen
                 if str(chat_id) == ADMIN_USER_ID and has_required_prefix(clean_query):
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                     if command_part == "ja":
@@ -1264,7 +1253,7 @@ def webhook():
                             json={"chat_id": chat_id, "text": "⏳ Führe GitHub Update aus...", "parse_mode": "Markdown"}
                         ).json()
                         lid = res.get("result", {}).get("message_id")
-                        executor.submit(process_message_async, chat_id, "ja", lid, False, None, None, False)
+                        bg_executor.submit(process_message_async, chat_id, "ja", lid, False, None, None, False)
                     else:
                         parts = command_part.split("\n", 1)
                         file_path = parts[0].strip() if len(parts) > 0 else "main.py"
@@ -1275,9 +1264,8 @@ def webhook():
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": res_msg, "parse_mode": "Markdown"}
                         )
-                    return "OK", 200
+                    return {"status": "processing"}, 200
 
-                # ZUSTANDS-KONTROLLE: Laufende Absprachen abfangen (Ort oder E-Mail)
                 current_state = get_user_fact(chat_id, "bot_state")
                 if current_state in ["waiting_for_location", "waiting_for_email_address"]:
                     res = requests.post(
@@ -1285,10 +1273,9 @@ def webhook():
                         json={"chat_id": chat_id, "text": "⏳ Eingabe wird verarbeitet...", "parse_mode": "Markdown"}
                     ).json()
                     lid = res.get("result", {}).get("message_id")
-                    executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None, False)
-                    return "OK", 200
+                    bg_executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None, False)
+                    return {"status": "processing"}, 200
 
-                # SHOPPING FILTER
                 is_shopping = False
                 lower_text = clean_query.lower()
                 for prefix in ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]:
@@ -1300,7 +1287,6 @@ def webhook():
                 if "zoll" in lower_text or "radkappen" in lower_text:
                     is_shopping = True
 
-                # AN GROQ & PROZESSOR ÜBERGEBEN
                 if TELEGRAM_BOT_TOKEN:
                     res = requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -1308,11 +1294,13 @@ def webhook():
                     ).json()
                     lid = res.get("result", {}).get("message_id")
                     if lid:
-                        executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
+                        bg_executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
                 
+                return {"status": "processing"}, 200
+
     except Exception as e:
         print(f"Webhook error: {e}", flush=True)
-    return "OK", 200
+    return {"status": "error"}, 200
 
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -1323,17 +1311,11 @@ def ping():
 # BACKGROUND WORKER START (Zentraler Start des Schedulers)
 # =====================================================================
 master_scheduler = BackgroundScheduler(daemon=True)
-
-# Registriert den 60-Sekunden-Postboten für Händler-Antworten (IMAP)
 master_scheduler.add_job(check_incoming_emails_and_forward, 'interval', seconds=60)
-
-# Registriert den täglichen Datenbank-Autopilot Job
 master_scheduler.add_job(daily_autopilot_job, 'interval', days=1)
-
-# Startet alle Hintergrundprozesse
 master_scheduler.start()
 
 # --- SERVER START ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(0.0.0.0, port=port, debug=False)
