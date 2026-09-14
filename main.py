@@ -290,7 +290,6 @@ def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_
     # =====================================================================
     if SEARXNG_URL:
         try:
-            # categories="general,images" sorgt dafür, dass wir Text UND Produktbilder bekommen!
             params = {
                 "q": query, 
                 "format": "json", 
@@ -309,14 +308,11 @@ def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_
                     link = r.get("url", "").strip()
                     title = r.get("title", "").strip()
                     snippet = r.get("content", r.get("template", "")).strip()
-                    
-                    # Holt das Produktbild direkt aus Google/Bing via SearXNG für die Flask-App
                     bild_url = r.get("img_src", r.get("thumbnail", "")) 
                     
                     if not link or not title:
                         continue
                         
-                    # Python wirft die Treffer nun unbesehen von DuckDuckGo in denselben Topf
                     results.append({
                         "title": title,
                         "snippet": snippet,
@@ -380,7 +376,6 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
     processed_items = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-    # --- 1. ZOLL-GRÖSSE FÜR DEN HARTEN PYTHON-FILTER ERMITTELN ---
     such_zoll = None
     zoll_match = re.search(r"(\d+)\s*(?:zoll|\"|inch)", user_query.lower())
     if zoll_match:
@@ -390,6 +385,7 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         title = item.get("title", "").strip()
         snippet = item.get("snippet", "").strip()
         link = item.get("link", "").strip()
+        bild_url = item.get("bild_url", "")
 
         if not link or not title:
             continue
@@ -401,45 +397,41 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         except Exception:
             domain = ""
 
-        # Blacklist-Filter (Sperrt dhgate und Co.)
         if any(domain == banned or domain.endswith("." + banned) for banned in BANNED_SOURCES):
             continue
 
-        # Duplikat-Filter
         if link in seen_links or title in seen_titles:
             continue
 
-        # --- 2. PYTHON FILTERT FALSCHE ZOLL-GRÖSSEN HERAUS ---
         if such_zoll:
             titel_zoll_matches = re.findall(r"(\d+)\s*(?:zoll|\"|inch)", title.lower())
             if titel_zoll_matches and such_zoll not in titel_zoll_matches:
                 print(f"[Chef-Zoll-Filter] Blockiert falsche Größe: {title}", flush=True)
-                continue  # Fliegt sofort raus, bevor Groq es sieht!
+                continue
 
         seen_links.add(link)
         seen_titles.add(title)
 
-        is_official = any(domain == trusted or domain.endswith("." + trusted) for trusted in TRUSTED_AUTHORITIES)
+        # === BEAUTY-FIX: Erkennt nun auch Subdomains wie www.ebay.de fehlerfrei! ===
+        is_official = any(trusted in domain for trusted in TRUSTED_AUTHORITIES)
         combined_text = (title + " " + snippet).lower()
         is_rumor = any(keyword in combined_text for keyword in RUMOR_KEYWORDS)
         
-        # --- 3. EMOJI-DREHER KORRIGIERT ---
         if is_official:
-            status_tag = "🟡 [GEPRÜFTER FAKT / OFFIZIELLE QUELLE]"  # Sauber Gelb für sichere Shops
+            status_tag = "🟡 [GEPRÜFTER FAKT / OFFIZIELLE QUELLE]"
             priority = 3
         elif is_rumor:
             status_tag = "⚠️ [UNBESTÄTIGTES GERÜCHT]"
             priority = 1
         else:
-            status_tag = "🔴 [UNGEPRÜFTE INFORMATION]"            # Sauber Rot für unbekannte Funde
+            status_tag = "🔴 [UNGEPRÜFTE INFORMATION]"
             priority = 2
 
         processed_items.append({
             "title": title, "domain": domain, "snippet": snippet,
-            "link": link, "status": status_tag, "priority": priority
+            "link": link, "bild_url": bild_url, "status": status_tag, "priority": priority
         })
 
-    # --- 4. BEAUTIFUL SOUP ARBEITET JETZT FÜR EBAY & CO ---
     offizielle_links = [item["link"] for item in processed_items if item["priority"] == 3]
 
     if offizielle_links:
@@ -472,9 +464,8 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         f"Nutze diese vorvalidierten Fakten als Fundament zur Beantwortung der Anfrage ('{user_query}'). "
         f"Übernehme die Status-Markierungen sowie die Quellen (Domains/Links) exakt in deine Antwort:\n\n"
     )
-    
+
     for idx, item in enumerate(processed_items[:5], 1):
-        # Python holt sich die Bild-URL, falls die Suchmaschine eine geliefert hat
         bild_url = item.get("bild_url", "")
         bild_zeile = f"Bild-URL: {bild_url}\n" if bild_url else "Bild-URL: Keine vorhanden\n"
 
@@ -482,7 +473,7 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
             f"--- Eintrag {idx} {item['status']} ---\n"
             f"Titel: {item['title']}\n"
             f"Quelle: {item['domain']} ({item['link']})\n"
-            f"{bild_zeile}"  # <--- NEU: Python rettet das Bild für die KI/Flask!
+            f"{bild_zeile}"
             f"Inhalt: {item['snippet']}\n\n"
         )
     return boss_packet
@@ -1015,7 +1006,6 @@ def frage_groq_mit_boss_dossier(boss_packet, user_query):
     return res.get("antwort_text", "Keine Antwort generiert.")
 
 def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
-    """Verarbeitet die Suche, prüft auf Smalltalk und leitet Statistiken an den Admin"""
     try:
         genutzte_quellen = []
         
@@ -1031,7 +1021,6 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": ADMIN_CHAT_ID, "text": admin_start_msg, "parse_mode": "Markdown"})
 
-        # --- CHEF-LOGIK FÜR SMALLTALK ---
         smalltalk_words = ["hallo", "hi", "servus", "moin", "wer bist du", "hilfe", "hey"]
         if user_query.lower().strip() in smalltalk_words or len(user_query) < 4:
             print(f"[Chef] Smalltalk erkannt: '{user_query}'. Überspringe Websuche.", flush=True)
@@ -1065,7 +1054,6 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
                           json={"chat_id": chat_id, "text": finale_antwort, "parse_mode": "Markdown"})
             return
 
-        # === ECHTE SUCHEN & TRIANGULATION ===
         gespeicherte_stadt = get_user_fact(chat_id, "user_city")
         if gespeicherte_stadt:
             print(f"[Chef] Gespeicherte Heimatstadt gefunden: {gespeicherte_stadt}. Ergänze Suchanfrage.", flush=True)
@@ -1383,7 +1371,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 # HINTERGRUND-WRAPPER MIT 2-SEKUNDEN-PUFFER & AUTOMATISCHEM LÖSCHEN
 # =====================================================================
 def background_worker_with_delay(chat_id, clean_query, is_shopping, media_type, file_id):
-    """Wartet 2 Sekunden. Wenn die Aufgabe bis dahin nicht fertig ist, wird die Sanduhr geschickt und am Ende gelöscht."""
     import threading
     
     finished_event = threading.Event()
@@ -1434,7 +1421,6 @@ def webhook():
         if not data:
             return {"status": "ignored"}, 200
 
-        # 1. BEARBEITUNG VON BUTTON-KLICKS (Inline Keyboards)
         if "callback_query" in data:
             cq = data["callback_query"]
             cq_id = cq["id"]
@@ -1469,7 +1455,6 @@ def webhook():
             bg_executor.submit(process_message_async, chat_id, callback_data, msg_id, False, None, None, True)
             return {"status": "processing"}, 200
 
-        # 2. BEARBEITUNG VON TEXTNACHRICHTEN UND MEDIEN
         if "message" in data:
             msg = data["message"]
             chat_id = str(msg["chat"]["id"])
@@ -1487,7 +1472,6 @@ def webhook():
             if raw_text or media_type:
                 clean_query = raw_text.strip() if raw_text else ""
 
-                # --- GITHUB AUTOMATISCHES UPDATE (ADMIN BEFEHL) ---
                 if str(chat_id) == str(ADMIN_USER_ID) and has_required_prefix(clean_query):
                     command_part = clean_query[len(REQUIRED_PREFIX):].strip()
                     if command_part == "ja":
@@ -1509,7 +1493,6 @@ def webhook():
                         )
                     return {"status": "processing"}, 200
 
-                # --- PRÜFUNG AUF FORMULAR-ZUSTÄNDE (Location/E-Mail) ---
                 current_state = get_user_fact(chat_id, "bot_state")
                 if current_state == "waiting_for_location":
                     set_user_fact(chat_id, "temp_location_input", clean_query)
@@ -1538,7 +1521,6 @@ def webhook():
                     bg_executor.submit(background_worker_with_delay, chat_id, clean_query, False, media_type, file_id)
                     return {"status": "processing"}, 200
 
-                # --- SHOPPING / SUCH-ERKENNUNG ---
                 is_shopping = False
                 lower_text = clean_query.lower()
                 for prefix in ["suche nach ", "suchen nach ", "suche ", "such ", "suchen ", "finde ", "finde"]:
@@ -1550,7 +1532,6 @@ def webhook():
                 if "zoll" in lower_text or "radkappen" in lower_text:
                     is_shopping = True
 
-                # --- VERARBEITUNG MIT 2-SEKUNDEN-PUFFER & LÖSCH-LOGIK ---
                 bg_executor.submit(background_worker_with_delay, chat_id, clean_query, is_shopping, media_type, file_id)
 
             return {"status": "processing"}, 200
