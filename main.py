@@ -285,23 +285,54 @@ def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_
         except Exception as e:
             print(f"[Info] DDG Search fehlgeschlagen: {e}", flush=True)
     
-    if not results and SEARXNG_URL:
+    # =====================================================================
+    # SEARXNG ABFRAGE (JETZT AKTIV ALS ZWEITE QUELLE – OHNE BLOCKADE!)
+    # =====================================================================
+    if SEARXNG_URL:
         try:
-            res = requests.get(f"{SEARXNG_URL}/search", params={"q": query, "format": "json"}, timeout=5)
+            # categories="general,images" sorgt dafür, dass wir Text UND Produktbilder bekommen!
+            params = {
+                "q": query, 
+                "format": "json", 
+                "categories": "general,images", 
+                "pageno": 1
+            }
+            
+            print(f"[Python-Boss] Rufe SearXNG parallel ab unter: {SEARXNG_URL}", flush=True)
+            res = requests.get(f"{SEARXNG_URL}/search", params=params, timeout=5)
+            
             if res.status_code == 200:
                 data = res.json()
-                for r in data.get("results", [])[:max_results]:
+                searxng_treffer = data.get("results", [])
+                
+                for r in searxng_treffer[:max_results]:
+                    link = r.get("url", "").strip()
+                    title = r.get("title", "").strip()
+                    snippet = r.get("content", r.get("template", "")).strip()
+                    
+                    # Holt das Produktbild direkt aus Google/Bing via SearXNG für die Flask-App
+                    bild_url = r.get("img_src", r.get("thumbnail", "")) 
+                    
+                    if not link or not title:
+                        continue
+                        
+                    # Python wirft die Treffer nun unbesehen von DuckDuckGo in denselben Topf
                     results.append({
-                        "title": r.get("title", ""),
-                        "snippet": r.get("content", ""),
-                        "link": r.get("url", "")
+                        "title": title,
+                        "snippet": snippet,
+                        "link": link,
+                        "bild_url": bild_url  
                     })
+                    
                     if stats_dict is not None:
                         stats_dict["SearXNG"] += 1
+                        
                 if results and "🔍 SearXNG" not in genutzte_quellen:
                     genutzte_quellen.append("🔍 SearXNG")
+                    
         except Exception as e:
             print(f"[Info] SearXNG Search fehlgeschlagen: {e}", flush=True)
+            
     return results
 
 
