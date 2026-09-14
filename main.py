@@ -310,11 +310,13 @@ def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_
 # =====================================================================
 TRUSTED_AUTHORITIES = {
     "apple.com", "microsoft.com", "reuters.com", "bloomberg.com", 
-    "heise.de", "golem.de", "t3n.de", "wikipedia.org", "tagesschau.de", "wetter.com", "dwd.de"
+    "heise.de", "golem.de", "t3n.de", "wikipedia.org", "tagesschau.de", "wetter.com", "dwd.de",
+    "ebay.de", "kleinanzeigen.de", "amazon.de", "kfzteile24.de", "autodoc.de", "facebook.com"
 }
 
 BANNED_SOURCES = {
-    "clickbait-news24.com", "dubious-rumors.net", "seo-spam-farm.org"
+    "clickbait-news24.com", "dubious-rumors.net", "seo-spam-farm.org",
+    "dhgate.com", "aliexpress.com", "temu.com", "wish.com"
 }
 
 RUMOR_KEYWORDS = ["gerücht", "soll", "angeblich", "womöglich", "insider behaupten", "wird gemunkelt"]
@@ -347,6 +349,12 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
     processed_items = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+    # --- 1. ZOLL-GRÖSSE FÜR DEN HARTEN PYTHON-FILTER ERMITTELN ---
+    such_zoll = None
+    zoll_match = re.search(r"(\d+)\s*(?:zoll|\"|inch)", user_query.lower())
+    if zoll_match:
+        such_zoll = zoll_match.group(1)
+
     for item in raw_results:
         title = item.get("title", "").strip()
         snippet = item.get("snippet", "").strip()
@@ -362,11 +370,21 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         except Exception:
             domain = ""
 
+        # Blacklist-Filter (Sperrt dhgate und Co.)
         if any(domain == banned or domain.endswith("." + banned) for banned in BANNED_SOURCES):
             continue
 
+        # Duplikat-Filter
         if link in seen_links or title in seen_titles:
             continue
+
+        # --- 2. PYTHON FILTERT FALSCHE ZOLL-GRÖSSEN HERAUS ---
+        if such_zoll:
+            titel_zoll_matches = re.findall(r"(\d+)\s*(?:zoll|\"|inch)", title.lower())
+            if titel_zoll_matches and such_zoll not in titel_zoll_matches:
+                print(f"[Chef-Zoll-Filter] Blockiert falsche Größe: {title}", flush=True)
+                continue  # Fliegt sofort raus, bevor Groq es sieht!
+
         seen_links.add(link)
         seen_titles.add(title)
 
@@ -374,14 +392,15 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         combined_text = (title + " " + snippet).lower()
         is_rumor = any(keyword in combined_text for keyword in RUMOR_KEYWORDS)
         
+        # --- 3. EMOJI-DREHER KORRIGIERT ---
         if is_official:
-            status_tag = "🔴 [OFFIZIELLER FAKT]"
+            status_tag = "🟡 [GEPRÜFTER FAKT / OFFIZIELLE QUELLE]"  # Sauber Gelb für sichere Shops
             priority = 3
         elif is_rumor:
             status_tag = "⚠️ [UNBESTÄTIGTES GERÜCHT]"
             priority = 1
         else:
-            status_tag = "🟡 [GEPRÜFTE INFORMATION]"
+            status_tag = "🔴 [UNGEPRÜFTE INFORMATION]"            # Sauber Rot für unbekannte Funde
             priority = 2
 
         processed_items.append({
@@ -389,10 +408,11 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
             "link": link, "status": status_tag, "priority": priority
         })
 
+    # --- 4. BEAUTIFUL SOUP ARBEITET JETZT FÜR EBAY & CO ---
     offizielle_links = [item["link"] for item in processed_items if item["priority"] == 3]
 
     if offizielle_links:
-        print("[Chef-Order] Starte paralleles Beautiful Soup Scraping...", flush=True)
+        print(f"[Chef-Order] Starte paralleles Beautiful Soup Scraping für {len(offizielle_links[:3])} Seiten...", flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             future_to_link = {executor.submit(hole_seite_einzeln, link, headers): link for link in offizielle_links[:3]}
             try:
@@ -838,7 +858,7 @@ def ask_groq(chat_id: str, query: str, web_context: str = "") -> dict:
         system_prompt = (
             "Du bist 'Code X', ein transparenter, neutraler und hilfsbereiter KI-Assistent in einem Telegram-Bot. "
             f"{psychology_context} "
-            "Wenn dir ein Dossier mit Web-Daten oder Medien-Daten übergeben wird, musst du die Status-Markierungen (🔴, 🟡, ⚠️) "
+            "Wenn dir ein Dossier mit Web-Daten oder Medien-Daten übergeben wird, musst du die Status-Markierungen "
             "und die **Quellen (Domains/Links)** zwingend in deine Antwort einbauen. "
             "Erfinde keine Fakten. "
             "Antworte AUSSCHLIESSLICH als reines JSON-Objekt im folgenden Format, ohne Markdown-Code-Blöcke:\n"
@@ -1180,31 +1200,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
             return
 
-        # 1. BEDIENUNG DES PREMIUM-MENÜS (Professionelle Vorteilserklärung OHNE Technik-Details!)
-        if is_callback and lower_query == "premium_suche_menue":
-            reply_markup = {
-                "inline_keyboard": [
-                    [{"text": "🚀 Premium-Suche starten (0.15 €)", "callback_data": "start_premium_crawl"}],
-                    [{"text": "❌ Zurück", "callback_data": "hauptmenue"}]
-                ]
-            }
-            
-            premium_text = (
-                "💎 **Premium-Live-Suche Meilenstein** 🚀\n\n"
-                "Du benötigst die absolut besten und aktuellsten Angebote auf dem Markt? "
-                "Unsere Premium-Suche schaltet die maximale Leistungsstufe des Systems frei:\n\n"
-                "⚡ **Deine exklusiven Premium-Vorteile:**\n"
-                "• **Maximale Marktabdeckung:** Das System durchsucht zeitgleich über fünfzig Marktplätze, Fachshops und Portale parallel in Sekundenschnelle.\n"
-                "• **Garantierte Produktbilder:** Du erhältst zu jedem gefundenen Angebot direkt das passende Bild im Chat angezeigt.\n"
-                "• **Intelligente Bestpreis-Garantie:** Das System filtert unseriöse Anbieter automatisch heraus, vergleicht Versandkosten und ermittelt den echten Tiefpreis.\n"
-                "• **Live-Verfügbarkeitscheck:** Die Angebote werden im selben Moment geprüft, um sicherzustellen, dass das Produkt auch wirklich sofort lieferbar ist.\n\n"
-                "💳 **Kosten pro Abfrage:** Einmalig **0.15 €** (wird von deinem Bot-Guthaben abgezogen)."
-            )
-            
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                          json={"chat_id": chat_id, "text": premium_text, "parse_mode": "Markdown", "reply_markup": reply_markup})
-            return
-
         if is_callback:
             if query == "web_suche":
                 set_user_fact(chat_id, "bot_state", None)
@@ -1318,7 +1313,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query == "restart":
                 set_user_fact(chat_id, "bot_state", None)
-                send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! What kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "regio_suche"}])
+                send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! Was kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "regio_suche"}])
                 return
 
         if is_shopping:
@@ -1374,13 +1369,11 @@ def background_worker_with_delay(chat_id, clean_query, is_shopping, media_type, 
     timer.start()
 
     try:
-        # Führe die eigentliche Logik aus
         process_message_async(chat_id, clean_query, None, is_shopping, media_type, file_id, False)
     finally:
         finished_event.set()
         timer.cancel()
         
-        # Sende-Hinweis automatisch wieder aus dem Chat löschen, falls er angezeigt wurde
         if assigned_message_id[0]:
             try:
                 requests.post(
