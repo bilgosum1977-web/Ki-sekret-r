@@ -1177,7 +1177,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             buttons.append({"text": "🏠 Hauptmenü", "callback": "restart"})
             
             save_message(chat_id, "assistant", nachricht)
-            send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, buttons=buttons)
+            send_telegram_photo_or_message(chat_id, nachricht, image_url=image_to_send, message_id=message_id, buttons=buttons)
             return
 
         # 1. BEDIENUNG DES PREMIUM-MENÜS (Professionelle Vorteilserklärung OHNE Technik-Details!)
@@ -1189,7 +1189,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 ]
             }
             
-            # Der neue, anonymisierte Text ohne technische Begriffe:
             premium_text = (
                 "💎 **Premium-Live-Suche Meilenstein** 🚀\n\n"
                 "Du benötigst die absolut besten und aktuellsten Angebote auf dem Markt? "
@@ -1209,8 +1208,14 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         if is_callback:
             if query == "web_suche":
                 set_user_fact(chat_id, "bot_state", None)
-                send_telegram_photo_or_message(chat_id, "🌐 Globale Websuche ausgewählt. Welches Produkt oder Thema möchtest du prüfen?", message_id=message_id)
-                return
+                
+                gemerkte_suche = get_user_fact(chat_id, "last_user_query") or "radkappen"
+                
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                              json={"chat_id": chat_id, "text": f"🌐 Starte globale Websuche für '{gemerkte_suche}'... Bitte warten ⏳", "parse_mode": "Markdown"})
+                
+                bg_executor.submit(hintergrund_task_such_engine, chat_id, gemerkte_suche)
+                return {"status": "processing"}, 200
             elif query == "regio_suche":
                 set_user_fact(chat_id, "bot_state", "waiting_for_location")
                 send_telegram_photo_or_message(chat_id, "📍 Bitte nenne mir deine Stadt für regionale Ergebnisse (z. B. Gelsenkirchen):", message_id=message_id, buttons=[{"text": "❌ Abbrechen", "callback": "restart"}])
@@ -1313,7 +1318,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
 
             elif query == "restart":
                 set_user_fact(chat_id, "bot_state", None)
-                send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! Was kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "regio_suche"}])
+                send_telegram_photo_or_message(chat_id, "🤖 Hauptmenü: Hallo! What kann ich heute für dich tun oder suchen?", message_id=message_id, buttons=[{"text": "📍 Standort setzen", "callback": "regio_suche"}])
                 return
 
         if is_shopping:
@@ -1321,7 +1326,7 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             set_user_fact(chat_id, "last_user_query", clean_search)
             nachricht = f"🛍️ Suchanfrage für '{clean_search}' registriert.\n\nWie möchtest du verfahren?"
             buttons = [{"text": "🌐 Im Web suchen (Gratis)", "callback": "web_suche"}, {"text": "📍 Regionale Suche (Ort)", "callback": "regio_suche"}]
-            send_telegram_photo_or_message(chat_id, nachricht, buttons=buttons)
+            send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=buttons)
             return
         else:
             if str(chat_id) == str(ADMIN_USER_ID) and user_input_text == "ja":
@@ -1341,6 +1346,50 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
     except Exception as thread_error:
         print(f"❌ KRITISCHER SYSTEMFEHLER: {thread_error}", flush=True)
         send_telegram_photo_or_message(chat_id, f"❌ Notbremse gegriffen: {str(thread_error)}", message_id=message_id)
+
+
+# =====================================================================
+# HINTERGRUND-WRAPPER MIT 2-SEKUNDEN-PUFFER & AUTOMATISCHEM LÖSCHEN
+# =====================================================================
+def background_worker_with_delay(chat_id, clean_query, is_shopping, media_type, file_id):
+    """Wartet 2 Sekunden. Wenn die Aufgabe bis dahin nicht fertig ist, wird die Sanduhr geschickt und am Ende gelöscht."""
+    import threading
+    
+    finished_event = threading.Event()
+    assigned_message_id = [None]
+
+    def send_sandclock_if_needed():
+        if not finished_event.is_set():
+            try:
+                res = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"},
+                    timeout=5
+                ).json()
+                assigned_message_id[0] = res.get("result", {}).get("message_id")
+            except Exception:
+                pass
+
+    timer = threading.Timer(2.0, send_sandclock_if_needed)
+    timer.start()
+
+    try:
+        # Führe die eigentliche Logik aus
+        process_message_async(chat_id, clean_query, None, is_shopping, media_type, file_id, False)
+    finally:
+        finished_event.set()
+        timer.cancel()
+        
+        # Sende-Hinweis automatisch wieder aus dem Chat löschen, falls er angezeigt wurde
+        if assigned_message_id[0]:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": assigned_message_id[0]},
+                    timeout=5
+                )
+            except Exception:
+                pass
 
 
 # =====================================================================
@@ -1366,7 +1415,6 @@ def webhook():
 
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cq_id})
             
-            # 🔴 NEU: ABSPRACHE-AUSWERTUNG (JA / NEIN BUTTONS)
             if callback_data.startswith("save_loc_ja:"):
                 stadt_to_save = callback_data.split(":", 1)[1]
                 set_user_fact(chat_id, "user_city", stadt_to_save)
@@ -1458,12 +1506,7 @@ def webhook():
                     return {"status": "processing"}, 200
 
                 elif current_state == "waiting_for_email_address":
-                    res = requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": "⏳ Eingabe wird verarbeitet...", "parse_mode": "Markdown"}
-                    ).json()
-                    lid = res.get("result", {}).get("message_id")
-                    bg_executor.submit(process_message_async, chat_id, clean_query, lid, False, None, None, False)
+                    bg_executor.submit(background_worker_with_delay, chat_id, clean_query, False, media_type, file_id)
                     return {"status": "processing"}, 200
 
                 # --- SHOPPING / SUCH-ERKENNUNG ---
@@ -1478,17 +1521,8 @@ def webhook():
                 if "zoll" in lower_text or "radkappen" in lower_text:
                     is_shopping = True
 
-                # --- VERARBEITUNG & SANDUHR-SENDUNG ---
-                res = requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": "⏳ Verarbeite Anfrage...", "parse_mode": "Markdown"}
-                ).json()
-                lid = res.get("result", {}).get("message_id")
-
-                if lid:
-                    bg_executor.submit(process_message_async, chat_id, clean_query, lid, is_shopping, media_type, file_id, False)
-                else:
-                    bg_executor.submit(hintergrund_task_such_engine, chat_id, clean_query, user_info)
+                # --- VERARBEITUNG MIT 2-SEKUNDEN-PUFFER & LÖSCH-LOGIK ---
+                bg_executor.submit(background_worker_with_delay, chat_id, clean_query, is_shopping, media_type, file_id)
 
             return {"status": "processing"}, 200
 
