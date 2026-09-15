@@ -2,7 +2,7 @@ use_default_settings: true
 
 server:
   secret_key: "dein-geheimer-zufalls-string"
-  limiter: false        # ← Wichtig! Muss false sein
+  limiter: false
   image_proxy: true
   base_url: "https://ki-sekret-r.onrender.com/"
 
@@ -13,3 +13,6 @@ ui:
 search:
   safe_search: 0
   default_lang: "de-DE"
+  formats:
+    - html
+    - json        # ← Das war das Problem!
