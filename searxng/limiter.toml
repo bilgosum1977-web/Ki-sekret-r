@@ -1,2 +1,9 @@
 [botdetection]
 enabled = false
+
+[ratelimit]
+enabled = false
+
+[server]
+secret_key = "change_me"
+
