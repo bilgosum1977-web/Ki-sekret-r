@@ -1,16 +1,25 @@
 use_default_settings: true
 
 server:
-  bind_address: "0.0.0.0"
-  port: 8080
-  base_url: "https://ki-sekret-r.onrender.com"
   secret_key: "ein_sicheres_passwort_hier"
+  limiter: false
+  image_proxy: true
+  base_url: "https://onrender.com"
 
-# Das zwingt den Server, die IP-Header-Warnung komplett zu ignorieren:
-http:
-  x_forwarded_for: false
-  x_real_ip: false
+ui:
+  static_use_hash: true
+  default_locale: "de"
+  default_theme: simple
 
-# Das schaltet die Bot-Erkennung vollständig im System ab:
-limiter:
-  enabled: false
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "de-DE"
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+
+outgoing:
+  request_timeout: 10.0
