@@ -1,11 +1,16 @@
-# Erlaubt SearXNG die korrekte Aktivierung der Datei
 use_default_settings: true
 
 server:
   bind_address: "0.0.0.0"
   port: 8888
-  base_url: "https://ki-sekret-r.onrender.com"
+  base_url: "https://onrender.com"
   secret_key: "ein_sicheres_passwort_hier"
 
-doi_resolver:
-  default: "oadoi.org"
+http:
+  x_forwarded_for: true
+
+engines:
+  - name: ahmia
+    remove: true
+  - name: torch
+    remove: true
