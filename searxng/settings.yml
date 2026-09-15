@@ -2,10 +2,19 @@ server:
   bind_address: "0.0.0.0"
   port: 8888
   base_url: "https://onrender.com"
-  secret_key: "change_me"
+  secret_key: "change_me_to_something_random"
   method: "GET"
   image_proxy: false
 
 http:
   x_forwarded_for: true
   x_real_ip: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "de"
+
+doi_resolver:
+  default: "oadoi.org"
+
