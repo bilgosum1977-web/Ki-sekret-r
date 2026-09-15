@@ -6,10 +6,11 @@ server:
   base_url: "https://ki-sekret-r.onrender.com"
   secret_key: "ein_sicheres_passwort_hier"
 
-# Das schaltet die fehlerhafte IP-Prüfung ab:
-enabled_plugins:
-  - 'Limiter plugin'
-  
-# Deaktiviert den blockierenden Schutz komplett:
+# Das zwingt den Server, die IP-Header-Warnung komplett zu ignorieren:
+http:
+  x_forwarded_for: false
+  x_real_ip: false
+
+# Das schaltet die Bot-Erkennung vollständig im System ab:
 limiter:
   enabled: false
