@@ -1,9 +1,6 @@
 FROM searxng/searxng:latest
 
-# Kopiert die Datei direkt in den inneren Programmordner von SearXNG
-COPY searxng/settings.yml /usr/local/searxng/searx/settings.yml
-
-# Sicherheitskopie am Standardort
+# Wir nutzen nur noch den absoluten Standard-Ordner
 COPY searxng/settings.yml /etc/searxng/settings.yml
 COPY searxng/limiter.toml /etc/searxng/limiter.toml
 
