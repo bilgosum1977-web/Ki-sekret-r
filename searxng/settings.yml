@@ -1,0 +1,11 @@
+server:
+  bind_address: "0.0.0.0"
+  port: 8888
+  base_url: "https://onrender.com"
+  secret_key: "change_me"
+  method: "GET"
+  image_proxy: false
+
+http:
+  x_forwarded_for: true
+  x_real_ip: true
