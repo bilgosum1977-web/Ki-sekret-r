@@ -1,5 +1,15 @@
 [botdetection.ip_limit]
 link_token = false
 
+[botdetection.ip_lists]
+block_ip = []
+pass_ip = []
+
+[real_ip]
+# Render benutzt einen Proxy - diese Header vertrauen
+x_for = 1
+ipv4_prefix = 32
+ipv6_prefix = 48
+
 
 
