@@ -269,27 +269,42 @@ def check_incoming_emails_and_forward():
 
 
 # =====================================================================
-# NEUE ZENTRALE WEB-SUCHE (SearXNG & DuckDuckGo Kombi) - Timeout 15s
+# NEUE ZENTRALE WEB-SUCHE (SearXNG & DuckDuckGo Kombi) - Parallel
 # =====================================================================
 def web_search(query, max_results=5):
     """
-    Fragt gleichzeitig SearXNG und DuckDuckGo ab, kombiniert die Ergebnisse
-    und übergibt sie gesammelt an die KI.
+    Fragt gleichzeitig SearXNG und DuckDuckGo per ThreadPoolExecutor ab, 
+    kombiniert die Ergebnisse und übergibt sie gesammelt an die KI.
     """
     combined_results = []
     seen_urls = set()
     searxng_success = False
     ddg_success = False
 
-    # 1. ABFRAGE: SearXNG (Dein Render-Server) mit Timeout=15
-    try:
-        searxng_url = SEARXNG_URL
-        params = {"q": query, "format": "json", "lang": "de"}
-        response = requests.get(searxng_url, params=params, timeout=15)
+    # Beide gleichzeitig aufrufen!
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get("results", [])
+        # SearXNG Task
+        def search_searxng():
+            params = {"q": query, "format": "json", "lang": "de"}
+            response = requests.get(SEARXNG_URL, params=params, timeout=15)
+            if response.status_code == 200:
+                return response.json().get("results", [])
+            return []
+
+        # DuckDuckGo Task
+        def search_ddg():
+            if DDGS:
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=max_results))
+            return []
+
+        future_searxng = executor.submit(search_searxng)
+        future_ddg = executor.submit(search_ddg)
+
+        # SearXNG Ergebnisse verarbeiten
+        try:
+            results = future_searxng.result(timeout=15)
             for r in results[:max_results]:
                 url = r.get("url")
                 if url and url not in seen_urls:
@@ -303,31 +318,29 @@ def web_search(query, max_results=5):
                     })
             if results:
                 searxng_success = True
-    except Exception as e:
-        print(f"⚠️ SearXNG-Abfrage fehlgeschlagen: {e}", flush=True)
-
-    # 2. ABFRAGE: DuckDuckGo (Als treuer Partner)
-    if DDGS:
-        try:
-            with DDGS() as ddgs:
-                ddg_results = list(ddgs.text(query, max_results=max_results))
-                for r in ddg_results:
-                    url = r.get("href")
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        combined_results.append({
-                            "title": r.get("title", "Kein Titel"),
-                            "link": url,
-                            "snippet": r.get("body", ""),
-                            "bild_url": "",
-                            "source": "DuckDuckGo"
-                        })
-                if ddg_results:
-                    ddg_success = True
         except Exception as e:
-            print(f"⚠️ DuckDuckGo-Abfrage fehlgeschlagen: {e}", flush=True)
+            print(f"⚠️ SearXNG fehlgeschlagen: {e}", flush=True)
 
-    # 3. KONTROLLE & QUELLEN-INFO FÜR DIE ADMIN-INFO
+        # DuckDuckGo Ergebnisse verarbeiten
+        try:
+            ddg_results = future_ddg.result(timeout=10)
+            for r in ddg_results:
+                url = r.get("href")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    combined_results.append({
+                        "title": r.get("title", "Kein Titel"),
+                        "link": url,
+                        "snippet": r.get("body", ""),
+                        "bild_url": "",
+                        "source": "DuckDuckGo"
+                    })
+            if ddg_results:
+                ddg_success = True
+        except Exception as e:
+            print(f"⚠️ DuckDuckGo fehlgeschlagen: {e}", flush=True)
+
+    # Quellen-Info ermitteln
     if searxng_success and ddg_success:
         source_info = "SearXNG & DuckDuckGo"
     elif searxng_success:
@@ -1069,7 +1082,7 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
 
         print(f"[Chef] Echte Suchanfrage erkannt: {user_query}. Starte Triangulation...", flush=True)
         
-        # Aufruf der web_search Funktion mit Timeout=15 im Hintergrund
+        # Aufruf der parallelen web_search Funktion
         raw_data, source_info = web_search(user_query, max_results=5)
         if source_info and source_info != "Keine Treffer":
             genutzte_quellen.append(source_info)
