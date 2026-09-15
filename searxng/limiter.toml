@@ -1,9 +1,8 @@
-[botdetection]
-enabled = false
+[botdetection.ip_limit]
+link_token = false
 
-[ratelimit]
-enabled = false
+[botdetection.ip_lists]
+block_ip = []
+pass_ip = []
 
-[server]
-secret_key = "change_me"
 
