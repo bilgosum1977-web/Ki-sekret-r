@@ -11,7 +11,7 @@ import requests
 import concurrent.futures
 import tempfile
 from urllib.parse import urlparse
-from flask import Flask, request
+from flask import Flask, request, render_template
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from groq import Groq
@@ -269,30 +269,25 @@ def check_incoming_emails_and_forward():
 
 
 # =====================================================================
-# NEUE ZENTRALE WEB-SUCHE (SearXNG & DuckDuckGo Kombi) - Parallel
+# ZENTRALE WEB-SUCHE (SearXNG & DuckDuckGo Kombi) - Parallel
 # =====================================================================
 def web_search(query, max_results=5):
-    """
-    Fragt gleichzeitig SearXNG und DuckDuckGo per ThreadPoolExecutor ab, 
-    kombiniert die Ergebnisse und übergibt sie gesammelt an die KI.
-    """
     combined_results = []
     seen_urls = set()
     searxng_success = False
     ddg_success = False
 
-    # Beide gleichzeitig aufrufen!
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         
-        # SearXNG Task
         def search_searxng():
             params = {"q": query, "format": "json", "lang": "de"}
             response = requests.get(SEARXNG_URL, params=params, timeout=15)
+            print(f"SearXNG Status: {response.status_code}", flush=True)
+            print(f"SearXNG URL: {SEARXNG_URL}", flush=True)
             if response.status_code == 200:
                 return response.json().get("results", [])
             return []
 
-        # DuckDuckGo Task
         def search_ddg():
             if DDGS:
                 with DDGS() as ddgs:
@@ -302,7 +297,6 @@ def web_search(query, max_results=5):
         future_searxng = executor.submit(search_searxng)
         future_ddg = executor.submit(search_ddg)
 
-        # SearXNG Ergebnisse verarbeiten
         try:
             results = future_searxng.result(timeout=15)
             for r in results[:max_results]:
@@ -321,7 +315,6 @@ def web_search(query, max_results=5):
         except Exception as e:
             print(f"⚠️ SearXNG fehlgeschlagen: {e}", flush=True)
 
-        # DuckDuckGo Ergebnisse verarbeiten
         try:
             ddg_results = future_ddg.result(timeout=10)
             for r in ddg_results:
@@ -340,7 +333,6 @@ def web_search(query, max_results=5):
         except Exception as e:
             print(f"⚠️ DuckDuckGo fehlgeschlagen: {e}", flush=True)
 
-    # Quellen-Info ermitteln
     if searxng_success and ddg_success:
         source_info = "SearXNG & DuckDuckGo"
     elif searxng_success:
@@ -351,7 +343,6 @@ def web_search(query, max_results=5):
         source_info = "Keine Treffer"
 
     print(f"🔍 Suche abgeschlossen. Quelle: {source_info}. Treffer gesamt: {len(combined_results)}", flush=True)
-    
     return combined_results, source_info
 
 
@@ -379,15 +370,52 @@ def check_if_search_needed(query: str) -> bool:
     return True
 
 def hole_seite_einzeln(link, headers):
+    start_time = time.time()
     try:
-        res = requests.get(link, headers=headers, timeout=3)
+        print(f"[BS4] Starte Request an: {link}", flush=True)
+        print(f"[BS4] Aktive Header-Keys: {list(headers.keys())}", flush=True)
+        
+        res = requests.get(link, headers=headers, timeout=8)
+        dauer = round(time.time() - start_time, 2)
+        
+        print(f"[BS4] Status: {res.status_code} | Dauer: {dauer}s | Finale URL: {res.url}", flush=True)
+        
+        if res.history:
+            kette = " -> ".join([r.url for r in res.history]) + f" -> {res.url}"
+            print(f"[BS4] Redirect-Kette erkannt: {kette}", flush=True)
+            
+        print(f"[BS4] Content-Type: {res.headers.get('Content-Type')} | Encoding: {res.encoding}", flush=True)
+
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                script.decompose()
-            return " ".join(soup.get_text().split())[:2000]
-    except Exception:
-        pass
+            
+            entfernte_tags_gesamt = 0
+            for tag_name in ["script", "style", "nav", "footer", "header", "aside"]:
+                gefundene = soup.find_all(tag_name)
+                if gefundene:
+                    print(f"[BS4] Entferne {len(gefundene)}x <{tag_name}>", flush=True)
+                    entfernte_tags_gesamt += len(gefundene)
+                for script in gefundene:
+                    script.decompose()
+            
+            print(f"[BS4] Insgesamt {entfernte_tags_gesamt} Tags bereinigt.", flush=True)
+            
+            roher_text = soup.get_text()
+            print(f"[BS4] Text vor Zusammenfassung: {len(roher_text)} Zeichen", flush=True)
+            
+            text = " ".join(roher_text.split())[:2000]
+            print(f"[BS4] Text nach Kürzung (max 2000): {len(text)} Zeichen", flush=True)
+            return text
+        else:
+            print(f"[BS4] Abbruch: Statuscode ist nicht 200 (Erhalten: {res.status_code})", flush=True)
+            
+    except requests.exceptions.Timeout:
+        print(f"[BS4] Timeout-Fehler (Limit: 8s) bei {link}", flush=True)
+    except requests.exceptions.ConnectionError:
+        print(f"[BS4] Verbindungsfehler (Server nicht erreichbar / DNS-Fehler) bei {link}", flush=True)
+    except Exception as e:
+        print(f"[BS4] Unerwarteter Fehler ({type(e).__name__}): {e} für {link}", flush=True)
+        
     return None
 
 def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen):
@@ -455,13 +483,14 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen):
         })
 
     offizielle_links = [item["link"] for item in processed_items if item["priority"] == 3]
+    print(f"[Debug] Offizielle Links gefunden: {len(offizielle_links)}", flush=True)
 
     if offizielle_links:
         print(f"[Chef-Order] Starte paralleles Beautiful Soup Scraping für {len(offizielle_links[:3])} Seiten...", flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             future_to_link = {executor.submit(hole_seite_einzeln, link, headers): link for link in offizielle_links[:3]}
             try:
-                for future in concurrent.futures.as_completed(future_to_link, timeout=10):
+                for future in concurrent.futures.as_completed(future_to_link, timeout=12):
                     link = future_to_link[future]
                     tiefen_text = future.result()
                     
@@ -473,7 +502,7 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen):
                                     genutzte_quellen.append("🥣 Beautiful Soup (Live-Volltext)")
                                 print(f"[Erfolg] Deep-Scraping beendet für: {item['domain']}", flush=True)
             except concurrent.futures.TimeoutError:
-                print("⚠️ [Zeitlimit erreicht] Deep-Scraping dauerte länger als 10 Sekunden.", flush=True)
+                print("⚠️ [Zeitlimit erreicht] Deep-Scraping dauerte länger als erwartet.", flush=True)
 
     processed_items.sort(key=lambda x: x["priority"], reverse=True)
     if not processed_items:
@@ -1082,7 +1111,6 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
 
         print(f"[Chef] Echte Suchanfrage erkannt: {user_query}. Starte Triangulation...", flush=True)
         
-        # Aufruf der parallelen web_search Funktion
         raw_data, source_info = web_search(user_query, max_results=5)
         if source_info and source_info != "Keine Treffer":
             genutzte_quellen.append(source_info)
@@ -1111,15 +1139,28 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
             if str(chat_id) == str(ADMIN_USER_ID):
                 finale_antwort += "\n\n⚙️ **[ADMIN-INFO]**\n➔ Boss-Filter war komplett leer."
             
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "🌐 Globale Web-Suche", "callback_data": "web_suche"}],
-                [{"text": "📍 Regionale Suche", "callback_data": "regio_suche"}]
-            ]
-        }
-        
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                      json={"chat_id": chat_id, "text": finale_antwort, "parse_mode": "Markdown", "reply_markup": reply_markup})
+        search_url = f"https://telegram-bot-3j6k.onrender.com/suche?q={requests.utils.quote(user_query)}"
+
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                      json={
+                          "chat_id": chat_id,
+                          "text": finale_antwort,
+                          "parse_mode": "Markdown",
+                          "reply_markup": {
+                              "inline_keyboard": [
+                                  [
+                                      {
+                                          "text": "🔍 Ergebnisse als Mini App anzeigen",
+                                          "web_app": {"url": search_url}
+                                      }
+                                  ],
+                                  [
+                                      {"text": "🌐 Globale Web-Suche", "callback_data": "web_suche"},
+                                      {"text": "📍 Regionale Suche", "callback_data": "regio_suche"}
+                                  ]
+                              ]
+                          }
+                      })
 
     except Exception as e:
         print(f"[Fehler im Hintergrund]: {e}", flush=True)
@@ -1244,7 +1285,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
         if is_callback:
             if query == "web_suche":
                 set_user_fact(chat_id, "bot_state", None)
-                
                 gemerkte_suche = get_user_fact(chat_id, "last_user_query") or "radkappen"
                 
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
@@ -1347,8 +1387,6 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                     send_telegram_photo_or_message(chat_id, nachricht, image_url=image_url, message_id=message_id, buttons=buttons)
                 return
 
-            elif query == "open_link:":
-                pass
             elif query.startswith("open_link:"):
                 target_url = query.replace("open_link:", "").strip()
                 send_telegram_photo_or_message(chat_id, f"🔗 Direkter Link zum Angebot:\n{target_url}", message_id=message_id, buttons=[{"text": "🏠 Hauptmenü", "callback": "restart"}])
@@ -1380,7 +1418,22 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
                 vollstaendiger_kontext = (medien_dossier + "\n\n" + clean_context).strip()
                 ki_frage = user_input_text if user_input_text else "Beschreibe und analysiere das Medium präzise."
                 nachricht = ask_groq(chat_id, ki_frage, web_context=vollstaendiger_kontext).get("antwort_text", "")
-                send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id)
+                
+                search_url = f"https://telegram-bot-3j6k.onrender.com/suche?q={requests.utils.quote(user_input_text)}"
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                              json={
+                                  "chat_id": chat_id,
+                                  "text": nachricht,
+                                  "parse_mode": "Markdown",
+                                  "reply_markup": {
+                                      "inline_keyboard": [[
+                                          {
+                                              "text": "🔍 Ergebnisse als Mini App anzeigen",
+                                              "web_app": {"url": search_url}
+                                          }
+                                      ]]
+                                  }
+                              })
 
     except Exception as thread_error:
         print(f"❌ KRITISCHER SYSTEMFEHLER: {thread_error}", flush=True)
@@ -1431,6 +1484,16 @@ def background_worker_with_delay(chat_id, clean_query, is_shopping, media_type, 
 # =====================================================================
 # FLASK WEBHOOK (DIE NON-BLOCKING EMPFANGS-SCHALTZENTRALE)
 # =====================================================================
+@app.route("/suche")
+def suche_seite():
+    query = request.args.get("q", "")
+    results = []
+    if query:
+        raw_data, _ = web_search(query, max_results=10)
+        results = raw_data
+    return render_template("suche.html", query=query, results=results)
+
+
 @app.route("/webhook", methods=["GET", "POST"], strict_slashes=False)
 def webhook():
     if request.method == "GET":
@@ -1569,9 +1632,17 @@ def ping():
 # =====================================================================
 # BACKGROUND WORKER START (Zentraler Start des Schedulers)
 # =====================================================================
+def ping_searxng():
+    try:
+        requests.get("https://ki-sekret-r.onrender.com/", timeout=10)
+        print("✅ SearXNG gepingt!", flush=True)
+    except Exception as e:
+        print(f"⚠️ SearXNG Ping fehlgeschlagen: {e}", flush=True)
+
 master_scheduler = BackgroundScheduler(daemon=True)
 master_scheduler.add_job(check_incoming_emails_and_forward, 'interval', seconds=60)
 master_scheduler.add_job(daily_autopilot_job, 'interval', days=1)
+master_scheduler.add_job(ping_searxng, 'interval', minutes=10)
 master_scheduler.start()
 
 # --- SERVER START ---
