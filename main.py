@@ -298,7 +298,7 @@ def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_
             }
             
             print(f"[Python-Boss] Rufe SearXNG parallel ab unter: {SEARXNG_URL}", flush=True)
-            res = requests.get(SEARXNG_URL, params=params, timeout=5)
+            res = requests.get(SEARXNG_URL, params=params, timeout=15)
             
             if res.status_code == 200:
                 data = res.json()
