@@ -1,12 +1,9 @@
-# SearXNG vollständige Standardkonfiguration
+# SearXNG bereinigte Konfiguration
 server:
   bind_address: "0.0.0.0"
   port: 8888
   base_url: "https://ki-sekret-r.onrender.com"
   secret_key: "change_me_to_something_random_and_secure"
-
-brand:
-  public_instance: false
 
 search:
   safe_search: 0
