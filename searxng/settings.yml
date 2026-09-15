@@ -5,6 +5,7 @@ server:
   limiter: false
   image_proxy: true
   base_url: "https://onrender.com"
+  bind_address: "0.0.0.0:10000"
 
 ui:
   static_use_hash: true
