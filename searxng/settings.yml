@@ -2,15 +2,14 @@ use_default_settings: true
 
 server:
   bind_address: "0.0.0.0"
-  port: 8888
-  base_url: "https://onrender.com"
+  port: 8080
+  base_url: "https://ki-sekret-r.onrender.com"
   secret_key: "ein_sicheres_passwort_hier"
 
-http:
-  x_forwarded_for: true
-
-engines:
-  - name: ahmia
-    remove: true
-  - name: torch
-    remove: true
+# Das schaltet die fehlerhafte IP-Prüfung ab:
+enabled_plugins:
+  - 'Limiter plugin'
+  
+# Deaktiviert den blockierenden Schutz komplett:
+limiter:
+  enabled: false
