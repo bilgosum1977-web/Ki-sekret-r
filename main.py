@@ -267,69 +267,79 @@ def check_incoming_emails_and_forward():
     except Exception as e:
         print(f"❌ IMAP-Fehler beim Postfach-Check: {e}")
 
-def fetch_raw_web_data_with_stats(query, genutzte_quellen, max_results=5, stats_dict=None):
-    results = []
-    if DDGS is not None:
+
+# =====================================================================
+# NEUE ZENTRALE WEB-SUCHE (SearXNG & DuckDuckGo Kombi) - Timeout 15s
+# =====================================================================
+def web_search(query, max_results=5):
+    """
+    Fragt gleichzeitig SearXNG und DuckDuckGo ab, kombiniert die Ergebnisse
+    und übergibt sie gesammelt an die KI.
+    """
+    combined_results = []
+    seen_urls = set()
+    searxng_success = False
+    ddg_success = False
+
+    # 1. ABFRAGE: SearXNG (Dein Render-Server) mit Timeout=15
+    try:
+        searxng_url = SEARXNG_URL
+        params = {"q": query, "format": "json", "lang": "de"}
+        response = requests.get(searxng_url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            for r in results[:max_results]:
+                url = r.get("url")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    combined_results.append({
+                        "title": r.get("title", "Kein Titel"),
+                        "link": url,
+                        "snippet": r.get("content", ""),
+                        "bild_url": r.get("img_src", r.get("thumbnail", "")),
+                        "source": "SearXNG"
+                    })
+            if results:
+                searxng_success = True
+    except Exception as e:
+        print(f"⚠️ SearXNG-Abfrage fehlgeschlagen: {e}", flush=True)
+
+    # 2. ABFRAGE: DuckDuckGo (Als treuer Partner)
+    if DDGS:
         try:
             with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=max_results):
-                    results.append({
-                        "title": r.get("title", ""),
-                        "snippet": r.get("body", ""),
-                        "link": r.get("href", "")
-                    })
-                    if stats_dict is not None:
-                        stats_dict["DuckDuckGo"] += 1
-            if results and "🦆 DuckDuckGo" not in genutzte_quellen:
-                genutzte_quellen.append("🦆 DuckDuckGo")
+                ddg_results = list(ddgs.text(query, max_results=max_results))
+                for r in ddg_results:
+                    url = r.get("href")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        combined_results.append({
+                            "title": r.get("title", "Kein Titel"),
+                            "link": url,
+                            "snippet": r.get("body", ""),
+                            "bild_url": "",
+                            "source": "DuckDuckGo"
+                        })
+                if ddg_results:
+                    ddg_success = True
         except Exception as e:
-            print(f"[Info] DDG Search fehlgeschlagen: {e}", flush=True)
+            print(f"⚠️ DuckDuckGo-Abfrage fehlgeschlagen: {e}", flush=True)
+
+    # 3. KONTROLLE & QUELLEN-INFO FÜR DIE ADMIN-INFO
+    if searxng_success and ddg_success:
+        source_info = "SearXNG & DuckDuckGo"
+    elif searxng_success:
+        source_info = "SearXNG"
+    elif ddg_success:
+        source_info = "DuckDuckGo"
+    else:
+        source_info = "Keine Treffer"
+
+    print(f"🔍 Suche abgeschlossen. Quelle: {source_info}. Treffer gesamt: {len(combined_results)}", flush=True)
     
-    # =====================================================================
-    # SEARXNG ABFRAGE (JETZT AKTIV ALS ZWEITE QUELLE – OHNE BLOCKADE!)
-    # =====================================================================
-    if SEARXNG_URL:
-        try:
-            params = {
-                "q": query, 
-                "format": "json", 
-                "categories": "general,images", 
-                "pageno": 1
-            }
-            
-            print(f"[Python-Boss] Rufe SearXNG parallel ab unter: {SEARXNG_URL}", flush=True)
-            res = requests.get(SEARXNG_URL, params=params, timeout=15)
-            
-            if res.status_code == 200:
-                data = res.json()
-                searxng_treffer = data.get("results", [])
-                
-                for r in searxng_treffer[:max_results]:
-                    link = r.get("url", "").strip()
-                    title = r.get("title", "").strip()
-                    snippet = r.get("content", r.get("template", "")).strip()
-                    bild_url = r.get("img_src", r.get("thumbnail", "")) 
-                    
-                    if not link or not title:
-                        continue
-                        
-                    results.append({
-                        "title": title,
-                        "snippet": snippet,
-                        "link": link,
-                        "bild_url": bild_url  
-                    })
-                    
-                    if stats_dict is not None:
-                        stats_dict["SearXNG"] += 1
-                        
-                if results and "🔍 SearXNG" not in genutzte_quellen:
-                    genutzte_quellen.append("🔍 SearXNG")
-                    
-        except Exception as e:
-            print(f"[Info] SearXNG Search fehlgeschlagen: {e}", flush=True)
-            
-    return results
+    return combined_results, source_info
 
 
 # =====================================================================
@@ -367,7 +377,7 @@ def hole_seite_einzeln(link, headers):
         pass
     return None
 
-def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stats_dict=None):
+def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen):
     if not check_if_search_needed(user_query) or not raw_results:
         return ""
 
@@ -412,7 +422,6 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
         seen_links.add(link)
         seen_titles.add(title)
 
-        # === BEAUTY-FIX: Erkennt nun auch Subdomains wie www.ebay.de fehlerfrei! ===
         is_official = any(trusted in domain for trusted in TRUSTED_AUTHORITIES)
         combined_text = (title + " " + snippet).lower()
         is_rumor = any(keyword in combined_text for keyword in RUMOR_KEYWORDS)
@@ -447,8 +456,6 @@ def master_data_cleaner_and_boss(raw_results, user_query, genutzte_quellen, stat
                         for item in processed_items:
                             if item["link"] == link:
                                 item["snippet"] = tiefen_text + "... [Volltext-Upgrade via Beautiful Soup]"
-                                if stats_dict is not None:
-                                    stats_dict["BeautifulSoup_DeepScrape"] += 1
                                 if "🥣 Beautiful Soup (Live-Volltext)" not in genutzte_quellen:
                                     genutzte_quellen.append("🥣 Beautiful Soup (Live-Volltext)")
                                 print(f"[Erfolg] Deep-Scraping beendet für: {item['domain']}", flush=True)
@@ -1061,20 +1068,18 @@ def hintergrund_task_such_engine(chat_id, user_query, user_info=None):
                 user_query = f"{user_query} {gespeicherte_stadt}"
 
         print(f"[Chef] Echte Suchanfrage erkannt: {user_query}. Starte Triangulation...", flush=True)
-        quellen_statistik = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
         
-        raw_data = fetch_raw_web_data_with_stats(user_query, genutzte_quellen, max_results=5, stats_dict=quellen_statistik)
-        boss_packet = master_data_cleaner_and_boss(raw_data, user_query, genutzte_quellen, stats_dict=quellen_statistik)
-        
-        if quellen_statistik["DuckDuckGo"] > 0 and "🦆 DuckDuckGo" not in genutzte_quellen: genutzte_quellen.append("🦆 DuckDuckGo")
-        if quellen_statistik["SearXNG"] > 0 and "🔍 SearXNG" not in genutzte_quellen: genutzte_quellen.append("🔍 SearXNG")
-        if quellen_statistik["BeautifulSoup_DeepScrape"] > 0 and "🥣 Beautiful Soup" not in genutzte_quellen: genutzte_quellen.append("🥣 Beautiful Soup")
+        # Aufruf der web_search Funktion mit Timeout=15 im Hintergrund
+        raw_data, source_info = web_search(user_query, max_results=5)
+        if source_info and source_info != "Keine Treffer":
+            genutzte_quellen.append(source_info)
+            
+        boss_packet = master_data_cleaner_and_boss(raw_data, user_query, genutzte_quellen)
 
         admin_data_msg = (
             f"📊 **System-Datenabruf für:** `{user_query}`\n"
-            f"➔ DuckDuckGo Treffer: {quellen_statistik['DuckDuckGo']}\n"
-            f"➔ SearXNG Treffer: {quellen_statistik['SearXNG']}\n"
-            f"➔ Beautiful Soup Deep-Scrapes: {quellen_statistik['BeautifulSoup_DeepScrape']}"
+            f"➔ Verwendete Quelle(n): {source_info}\n"
+            f"➔ Treffer gesamt: {len(raw_data)}"
         )
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": ADMIN_CHAT_ID, "text": admin_data_msg, "parse_mode": "Markdown"})
@@ -1180,12 +1185,11 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             daten_quelle = "Lokaler DB-Cache (Kostenlos)"
             
             if not produkte:
-                daten_quelle = "Kostenlose Suchmaschine (DuckDuckGo/SearXNG)"
+                daten_quelle = "Kostenlose Suchmaschine (SearXNG/DuckDuckGo)"
                 if check_if_search_needed(such_string_mit_ort):
-                    dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
-                    dummy_quellen = []
-                    raw_web_data = fetch_raw_web_data_with_stats(such_string_mit_ort, dummy_quellen, max_results=5, stats_dict=dummy_stats)
-                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort, dummy_quellen, stats_dict=dummy_stats)
+                    raw_web_data, source_info = web_search(such_string_mit_ort, max_results=5)
+                    dummy_quellen = [source_info] if source_info != "Keine Treffer" else []
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, such_string_mit_ort, dummy_quellen)
                     if clean_context:
                         groq_result = ask_groq(chat_id, f"Finde Angebote zu {such_string_mit_ort}", web_context=clean_context)
                         nachricht = f"🌐 **Kostenlose Marktanalyse für '{gemerkte_suche}' in {loc}:**\n\n" + groq_result.get("antwort_text", "")
@@ -1293,9 +1297,11 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             elif query.startswith("premium_price_check:"):
                 s_term = query.replace("premium_price_check:", "").strip()
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"🌐 Auftrag erteilt. Durchsuche das Web nach Spar-Angeboten für '{s_term}'...", "parse_mode": "Markdown"})
-                dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
-                dummy_quellen = []
-                clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(s_term, dummy_quellen, max_results=5, stats_dict=dummy_stats), s_term, dummy_quellen, stats_dict=dummy_stats)
+                
+                raw_web_data, source_info = web_search(s_term, max_results=5)
+                dummy_quellen = [source_info] if source_info != "Keine Treffer" else []
+                clean_context = master_data_cleaner_and_boss(raw_web_data, s_term, dummy_quellen)
+                
                 nachricht = f"📉 Online-Gegenanalyse für '{s_term}':\n\n" + ask_groq(chat_id, f"Günstige Web-Angebote für {s_term}", web_context=clean_context).get("antwort_text", "")
                 endkunden_preis = (ECHTE_SCRAPING_KOSTEN_PRO_RESULTAT * 50) * (1 + DEINE_PROZENTUALE_MARGE)
                 send_telegram_photo_or_message(chat_id, nachricht, message_id=message_id, buttons=[{"text": f"💎 Premium-Suche ({endkunden_preis:.2f}€)", "callback": "premium_info"}, {"text": "🏠 Menü", "callback": "restart"}])
@@ -1354,9 +1360,10 @@ def process_message_async(chat_id, query, message_id, is_shopping, media_type=No
             else:
                 clean_context = ""
                 if check_if_search_needed(user_input_text):
-                    dummy_stats = {"DuckDuckGo": 0, "SearXNG": 0, "BeautifulSoup_DeepScrape": 0}
-                    dummy_quellen = []
-                    clean_context = master_data_cleaner_and_boss(fetch_raw_web_data_with_stats(user_input_text, dummy_quellen, max_results=5, stats_dict=dummy_stats), user_input_text, dummy_quellen, stats_dict=dummy_stats)
+                    raw_web_data, source_info = web_search(user_input_text, max_results=5)
+                    dummy_quellen = [source_info] if source_info != "Keine Treffer" else []
+                    clean_context = master_data_cleaner_and_boss(raw_web_data, user_input_text, dummy_quellen)
+                
                 vollstaendiger_kontext = (medien_dossier + "\n\n" + clean_context).strip()
                 ki_frage = user_input_text if user_input_text else "Beschreibe und analysiere das Medium präzise."
                 nachricht = ask_groq(chat_id, ki_frage, web_context=vollstaendiger_kontext).get("antwort_text", "")
