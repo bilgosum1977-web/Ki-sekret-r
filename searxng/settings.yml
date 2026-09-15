@@ -15,4 +15,15 @@ search:
   default_lang: "de-DE"
   formats:
     - html
-    - json        # ← Das war das Problem!
+    - json
+
+engines:
+  - name: google images
+    engine: google_images
+    shortcut: gimg
+    disabled: false
+
+  - name: bing images
+    engine: bing_images
+    shortcut: bimg
+    disabled: false
