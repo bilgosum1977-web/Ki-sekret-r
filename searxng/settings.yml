@@ -2,7 +2,7 @@ use_default_settings: true
 
 server:
   secret_key: "dein-geheimer-zufalls-string"
-  limiter: false
+  limiter: false        # ← Wichtig! Muss false sein
   image_proxy: true
   base_url: "https://ki-sekret-r.onrender.com/"
 
