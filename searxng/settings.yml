@@ -1,29 +1,82 @@
-use_default_settings: true
+# ═══════════════════════════════════════
+# render.yaml – Render.com Konfiguration
+# ═══════════════════════════════════════
 
-server:
-  secret_key: "dein-geheimer-zufalls-string"
-  limiter: false
-  image_proxy: true
-  base_url: "https://ki-sekret-r.onrender.com/"
+services:
+  - type: web
+    name: telegram-bot
+    runtime: python
+    region: frankfurt    # ← EU Server
+                         #   (schneller für DE)
+    plan: free
 
-ui:
-  static_use_hash: true
-  default_locale: "de"
+    buildCommand: pip install -r requirements.txt
 
-search:
-  safe_search: 0
-  default_lang: "de-DE"
-  formats:
-    - html
-    - json
+    startCommand: >
+      gunicorn main:app
+      --bind 0.0.0.0:$PORT
+      --workers 1
+      --timeout 120
+      --preload
+      --log-level info
 
-engines:
-  - name: google images
-    engine: google_images
-    shortcut: gimg
-    disabled: false
+    healthCheckPath: /
 
-  - name: bing images
-    engine: bing_images
-    shortcut: bimg
-    disabled: false
+    envVars:
+      # ── Telegram ──────────────────────
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false        # ← manuell setzen!
+
+      # ── Groq AI ───────────────────────
+      - key: GROQ_API_KEY
+        sync: false
+
+      # ── Apify ─────────────────────────
+      - key: APIFY_TOKEN
+        sync: false
+
+      # ── Tankerkönig ───────────────────
+      - key: TANKERKOENIG_API_KEY
+        sync: false
+
+      # ── E-Mail SMTP ───────────────────
+      - key: SMTP_SERVER
+        sync: false
+
+      - key: SMTP_PORT
+        value: "587"       # ← Standard Port
+
+      - key: SMTP_USER
+        sync: false
+
+      - key: SMTP_PASSWORD
+        sync: false
+
+      # ── E-Mail IMAP ───────────────────
+      - key: IMAP_SERVER
+        sync: false
+
+      - key: IMAP_PORT
+        value: "993"       # ← Standard Port
+
+      # ── SearXNG ───────────────────────
+      - key: SEARXNG_URL
+        sync: false
+
+      # ── Bot Konfiguration ─────────────
+      - key: BASE_URL
+        value: "https://telegram-bot-3j6k.onrender.com"
+        # ↑ DEINE Render URL eintragen!
+
+      - key: ADMIN_USER_ID
+        value: "8874543115"
+        # ↑ Deine Telegram User ID
+
+      - key: DB_PATH
+        value: "/tmp/bot_memory.db"
+        # ↑ /tmp = überlebt Restarts NICHT
+        #   aber kostenlos auf Free Plan
+
+      # ── Python ────────────────────────
+      - key: PYTHON_VERSION
+        value: "3.11.0"
